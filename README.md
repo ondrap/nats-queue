@@ -9,11 +9,11 @@ Haskell API for NATS messaging system (see https://github.com/derekcollison/nats
   for timeouts as in other language API.
 * There is no automatic unsubscribe after certain number of messages as this
   is easily handled by other means.
-* The functions 'unsubscribe' and 'publish' will not fail; they may block
+* The functions `unsubscribe` and `publish` will not fail; they may block
   on the network communication. They will not block and not throw an exception 
   if the client is disconnected from the server. (NATS does not guarantee delivery anyway)
 * The module currently does not try to ping the server to find out if it is alive.
-  It responds to pings sent by the server correctly.
+  It responds to pings sent by the NATS server correctly.
 
 Example use:
 
