@@ -1,7 +1,19 @@
-nats-queue
+NATS - Haskell client
 ==========
 
-Haskell API for NATS messaging system (see https://github.com/derekcollison/nats)
+Haskell API for NATS messaging system (see https://github.com/derekcollison/nats).
+
+* Network failures/reconnections are handled automatically in the background,
+  however `subscribe` and `request` functions can still return a network exception.
+* It should correctly combine with `System.Timeout`, therefore there is no API
+  for timeouts as in other language API.
+* There is no automatic unsubscribe after certain number of messages as this
+  is easily handled by other means.
+* The functions 'unsubscribe' and 'publish' will not fail; they may block
+  on the network communication. They will not block and not throw an exception 
+  if the client is disconnected from the server. (NATS does not guarantee delivery anyway)
+* The module currently does not try to ping the server to find out if it is alive.
+  It responds to pings sent by the server correctly.
 
 Example use:
 
@@ -13,22 +25,25 @@ import Control.Concurrent
 
 main :: IO ()
 main = do
+    -- Connect to the NATS server
     nats <- connect "nats://user:password@localhost:4222"
-
-    sid <- subscribe nats "news" Nothing $ \_ _ msg _ -> putStrLn $ show msg
-
+    -- Subscribe to channel "news", we do not use any queue group
+    sid <- subscribe nats "news" Nothing $ 
+            \_ _ msg _ ->    -- The parameters are (sid, subject, message, reply_subject)
+                putStrLn $ show msg
+    -- Publish a message (the message parameter is a lazy ByteString)
     publish nats "news" "I got news for you"
+    -- Wait so that we can receive the message from the server
     threadDelay 1000000
-
+    -- Unsubscribe from the channel
     unsubscribe nats sid
-
+    -- Subscribe to a "gift" channel
     subscribe nats "gift" Nothing $ \_ _ msg mreply -> do
         putStrLn $ show msg
-        case mreply of
+        case mreply of -- If the sender used a 'request' call, use this subject to send message back
             Nothing -> return ()
             Just reply -> publish nats reply "I've got a gift for you."
-
+    -- Request/response communication with a "gift" channel
     reply <- request nats "gift" "Do you have anything for me?"
-
     putStrLn $ show reply
 ```
