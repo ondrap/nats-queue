@@ -497,7 +497,7 @@ subscribe nats subject queue cb = do
         putMVar mvar err
     merr <- takeMVar mvar
     case merr of
-         Just err -> error $ show err
+         Just err -> throwIO $ NatsException $ T.unpack err
          Nothing -> return $ sid
 
 -- | Unsubscribe from a channel
