@@ -55,6 +55,7 @@ module Network.Nats (
     -- command is synchronous, it waits until the server responds with +OK. The commands 'publish'
     -- and 'unsubscribe' are asynchronous, no confirmation from server is required.
     Nats
+    , NatsSID
     , connect
     -- * Exceptions
     , NatsException
