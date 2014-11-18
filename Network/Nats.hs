@@ -221,25 +221,25 @@ makeClntMsg = BL.fromChunks . _makeClntMsg
         _makeClntMsg (NatsClntConnect info) = "CONNECT " : (BL.toChunks $ AE.encode info)
     
 -- | Decode NATS server message; result is message + payload (payload is 'undefined' in NatsSvrMsg)
-decodeMessage :: BS.ByteString -> Maybe (NatsSvrMessage, Int)
+decodeMessage :: BS.ByteString -> Maybe (NatsSvrMessage, Maybe Int)
 decodeMessage line = decodeMessage_ mid mpayload
     where 
         (mid, mpayload) = (BS.takeWhile (\x -> x/=' ' && x/='\r') line, 
                              BS.drop 1 $ BS.dropWhile (\x -> x/=' ' && x/='\r') line)
 
-        decodeMessage_ :: BS.ByteString -> BS.ByteString -> Maybe (NatsSvrMessage, Int)
-        decodeMessage_ "PING" _ = Just (NatsSvrPing, 0)
-        decodeMessage_ "PONG" _ = Just (NatsSvrPong, 0)
-        decodeMessage_ "+OK" _ = Just (NatsSvrOK, 0)
-        decodeMessage_ "-ERR" msg = Just (NatsSvrError (decodeUtf8 msg), 0)
+        decodeMessage_ :: BS.ByteString -> BS.ByteString -> Maybe (NatsSvrMessage, Maybe Int)
+        decodeMessage_ "PING" _ = Just (NatsSvrPing, Nothing)
+        decodeMessage_ "PONG" _ = Just (NatsSvrPong, Nothing)
+        decodeMessage_ "+OK" _ = Just (NatsSvrOK, Nothing)
+        decodeMessage_ "-ERR" msg = Just (NatsSvrError (decodeUtf8 msg), Nothing)
         decodeMessage_ "INFO" msg = do
             info <- AE.decode $ BL.fromChunks [msg]
-            return $ (NatsSvrInfo info, 0)
+            return $ (NatsSvrInfo info, Nothing)
         decodeMessage_ "MSG" msg = do
             let fields = BS.split ' ' msg
             case (map BS.unpack fields) of
-                 [subj, sid, len] -> return (NatsSvrMsg subj (read sid) undefined Nothing, read len)
-                 [subj, sid, reply, len] -> return (NatsSvrMsg subj (read sid) undefined (Just $ reply), read $ len)
+                 [subj, sid, len] -> return (NatsSvrMsg subj (read sid) undefined Nothing, Just $ read len)
+                 [subj, sid, reply, len] -> return (NatsSvrMsg subj (read sid) undefined (Just $ reply), Just $ read len)
                  _ -> fail ""
         decodeMessage_ _ _ = Nothing
 
@@ -339,15 +339,15 @@ authenticate :: Nats -> Handle -> IO ()
 authenticate nats handle = do
     info <- BS.hGetLine handle
     case (decodeMessage info) of
-        Just (NatsSvrInfo (NatsServerInfo {natsSvrAuthRequired=True}), 0) -> do
+        Just (NatsSvrInfo (NatsServerInfo {natsSvrAuthRequired=True}), Nothing) -> do
             BL.hPut handle $ makeClntMsg (NatsClntConnect $ natsConnOptions nats)
             BS.hPut handle "\r\n"
             response <- BS.hGetLine handle
             case (decodeMessage response) of
-                 Just (NatsSvrOK, 0) -> return ()
-                 Just (NatsSvrError err, 0)-> throwIO $ NatsException $ "Authentication error: " ++ (show err)
+                 Just (NatsSvrOK, Nothing) -> return ()
+                 Just (NatsSvrError err, Nothing)-> throwIO $ NatsException $ "Authentication error: " ++ (show err)
                  _ -> throwIO $ NatsException $ "Incorrect server response"
-        Just (NatsSvrInfo _, 0) -> return ()
+        Just (NatsSvrInfo _, Nothing) -> return ()
         _ -> throwIO $ NatsException "Incorrect input from server"
             
 -- | Open and authenticate a connection
@@ -431,9 +431,9 @@ connectionHandler nats = do
         in do
             line <- BS.hGetLine handle
             case (decodeMessage line) of
-                    Just (msg, 0) -> do
+                    Just (msg, Nothing) -> do
                         handleMessage msg
-                    Just (msg@(NatsSvrMsg {}), paylen) -> do
+                    Just (msg@(NatsSvrMsg {}), Just paylen) -> do
                         payload <- BS.hGet handle paylen
                         _ <- BS.hGet handle 2 -- CRLF
                         handleMessage msg{msgText=payload}
