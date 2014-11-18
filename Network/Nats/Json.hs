@@ -24,10 +24,10 @@ subscribe :: AE.FromJSON a =>
     Nats 
     -> String -- ^ Subject
     -> (Maybe String) -- ^ Queue
-    -> (NatsSID -- ^ SID of subscription
-        -> String -- ^ Subject
-        -> a -- ^ Message
-        -> Maybe String -- ^ Reply subject
+    -> (NatsSID
+        -> String
+        -> a
+        -> Maybe String
         -> IO ()
         )
     -- ^ Callback
