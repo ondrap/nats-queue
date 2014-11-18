@@ -82,6 +82,7 @@ import Data.Typeable
 import qualified Data.Foldable as FOLD
 import Control.Exception (bracket, bracketOnError, throwIO, catch, IOException, AsyncException, Exception)
 import System.Random (randomRIO)
+import Data.IORef
 
 import qualified Data.Map.Strict as Map
 import qualified Data.ByteString.Lazy.Char8 as BL
@@ -170,8 +171,8 @@ data Nats = Nats {
                                MVar () -- Empty mvar that gets full in the moment we connect
                                )
         , natsThreadId :: MVar ThreadId
-        , natsNextSid :: MVar NatsSID
-        , natsSubMap :: MVar (Map.Map NatsSID NatsSubscription)
+        , natsNextSid :: IORef NatsSID
+        , natsSubMap :: IORef (Map.Map NatsSID NatsSubscription)
     }
 
 
@@ -246,7 +247,7 @@ decodeMessage line = decodeMessage_ mid mpayload
     
 -- | Returns next sid and updates MVar
 newNatsSid :: Nats -> IO NatsSID
-newNatsSid nats = modifyMVar (natsNextSid nats) $ \sid -> return (sid + 1, sid)
+newNatsSid nats = atomicModifyIORef' (natsNextSid nats) $ \sid -> (sid + 1, sid)
 
 -- | Generates a new INBOX name for request/response communication
 newInbox :: IO String
@@ -397,7 +398,7 @@ connectionHandler :: Nats -> IO ()
 connectionHandler nats = do
     (handle, _, _, _) <- readMVar (natsRuntime nats)
     -- Subscribe channels that are supposed to be subscribed
-    subscriptions <- readMVar (natsSubMap nats)
+    subscriptions <- readIORef (natsSubMap nats)
     FOLD.forM_ subscriptions $ \(NatsSubscription subject queue _ sid) ->
         sendMessage nats True (NatsClntSubscribe subject sid queue) Nothing
     -- Perform the job
@@ -423,7 +424,7 @@ connectionHandler nats = do
                 sendMessage nats True (NatsClntConnect $ natsConnOptions nats) Nothing
             handleMessage (NatsSvrInfo _) = return ()
             handleMessage (NatsSvrMsg {..}) = do
-                msubscription <- Map.lookup msgSid <$> readMVar (natsSubMap nats)
+                msubscription <- Map.lookup msgSid <$> readIORef (natsSubMap nats)
                 case msubscription of
                      Just subscription -> (subCallback subscription) msgSid msgSubject (BL.fromChunks [msgText]) msgReply
                      -- SID not found in map, force unsubscribe
@@ -462,8 +463,8 @@ connect uri = do
     csig <- newEmptyMVar
     mruntime <- newMVar (undefined, undefined, False, csig)
     mthreadid <- newEmptyMVar 
-    nextsid <- newMVar 1
-    submap <- newMVar Map.empty
+    nextsid <- newIORef 1
+    submap <- newIORef Map.empty
     let opts = defaultConnectionOptions{natsConnUser=T.pack user, natsConnPass=T.pack password} 
     let nats = Nats{
         natsConnOptions=opts 
@@ -493,8 +494,8 @@ subscribe nats subject queue cb = do
     sendMessage nats True (NatsClntSubscribe ssubject sid squeue) $ Just $ \err -> do
         case err of
             Just _ -> return ()
-            Nothing -> modifyMVarMasked_ (natsSubMap nats) 
-                        (return . Map.insert sid (NatsSubscription{subSubject=ssubject, subQueue=squeue, subCallback=cb, subSid=sid})) 
+            Nothing -> atomicModifyIORef' (natsSubMap nats) $ \ioref ->
+                (Map.insert sid (NatsSubscription{subSubject=ssubject, subQueue=squeue, subCallback=cb, subSid=sid}) ioref, ()) 
         putMVar mvar err
     merr <- takeMVar mvar
     case merr of
@@ -507,7 +508,7 @@ unsubscribe :: Nats
     -> IO ()
 unsubscribe nats sid = do
     -- Remove from internal tables
-    modifyMVarMasked_ (natsSubMap nats) (return . Map.delete sid)
+    atomicModifyIORef' (natsSubMap nats) $ \ioref -> (Map.delete sid ioref, ())
     -- Unsubscribe from server, ignore errors
     sendMessage nats False (NatsClntUnsubscribe sid) Nothing
         `catch` ((\_ -> return ()) :: IOException -> IO ())
