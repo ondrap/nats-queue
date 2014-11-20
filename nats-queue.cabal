@@ -1,5 +1,5 @@
 name:                nats-queue
-version:             0.1.0.1
+version:             0.1.1.0
 synopsis:            Haskell API for NATS messaging system
 description:         
     This library is a Haskell driver for NATS <http://nats.io>. 
