@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell,OverloadedStrings,RecordWildCards,GeneralizedNewtypeDeriving,PatternGuards,DeriveDataTypeable #-}
+{-# LANGUAGE TemplateHaskell,OverloadedStrings,RecordWildCards,GeneralizedNewtypeDeriving,PatternGuards,DeriveDataTypeable, ScopedTypeVariables #-}
 
 module Network.Nats (
     -- * How to use this module
@@ -45,18 +45,25 @@ module Network.Nats (
     -- * Error behaviour
     -- |The 'connect' function tries to connect to the NATS server. In case of failure it immediately fails.
     -- If there is an error during operations, the NATS module tries to reconnect to the server.
+    -- When there are more servers, the client immediately tries to connect to the next server. If
+    -- that fails, it waits 1s before trying the next server in the NatsSettings list.
+    --
     -- During the reconnection, the calls 'subscribe' and 'request' will block. The calls
     -- 'publish' and 'unsubscribe' silently fail (unsubscribe is handled locally, NATS is a messaging
     -- system without guarantees, 'publish' is not guaranteed to succeed anyway).
     -- After reconnecting to the server, the module automatically resubscribes to previously subscribed channels.
     --
-    -- If there is network failure, the nats commands 'subscribe' and 'request' 
+    -- If there is a network failure, the nats commands 'subscribe' and 'request' 
     -- may fail on a network exception. The 'subscribe'
     -- command is synchronous, it waits until the server responds with +OK. The commands 'publish'
     -- and 'unsubscribe' are asynchronous, no confirmation from server is required.
+    --
     Nats
     , NatsSID
     , connect
+    , connectSettings
+    , NatsSettings(..)
+    , defaultSettings
     -- * Exceptions
     , NatsException
     -- * Access
@@ -100,10 +107,10 @@ import qualified Network.URI as URI
 data NatsException = NatsException String
     deriving (Show, Typeable)
 instance Exception NatsException
-            
+
 data NatsConnectionOptions = NatsConnectionOptions {
-        natsConnUser :: T.Text
-        , natsConnPass :: T.Text
+        natsConnUser :: String
+        , natsConnPass :: String
         , natsConnVerbose :: Bool
         , natsConnPedantic :: Bool
         , natsConnSslRequired :: Bool
@@ -163,8 +170,7 @@ type FifoQueue = D.BankersDequeue (Maybe T.Text -> IO ())
 -- | Control structure representing a connection to NATS server
 data Nats = Nats {
           natsConnOptions :: NatsConnectionOptions
-        , natsHost :: String
-        , natsPort :: Int
+        , natsSettings :: NatsSettings
         , natsRuntime :: MVar (Handle, -- Network socket
                                FifoQueue, -- FIFO of sent commands waiting for ack
                                Bool, -- False if we are disconnected
@@ -175,7 +181,24 @@ data Nats = Nats {
         , natsSubMap :: IORef (Map.Map NatsSID NatsSubscription)
     }
 
+-- | Advanced settings for connecting to NATS server
+data NatsSettings = NatsSettings {
+        natsHosts :: [(String, Int)]  -- ^ List of (host,port) NATS servers in a cluster
+      , natsUser :: String            -- ^ Username for authentication
+      , natsPassword :: String        -- ^ Password for authentication
+      , natsOnConnect :: Nats -> (String, Int) -> IO ()  -- ^ Called when a client has successfully connected
+      , natsOnDisconnect :: Nats -> IO ()                -- ^ Called when a client was disconnected
+    }
 
+defaultSettings :: NatsSettings
+defaultSettings = (NatsSettings {
+        natsHosts = [("localhost", 4222)]
+      , natsUser = "nats"
+      , natsPassword = "nats"
+      , natsOnConnect = \_ _ -> (return ())
+      , natsOnDisconnect = const (return ())
+    })
+    
 -- | Message received by the client from the server
 data NatsSvrMessage =
     NatsSvrMsg { msgSubject::String, msgSid::NatsSID, msgText::BS.ByteString, msgReply::Maybe String}
@@ -352,18 +375,20 @@ authenticate nats handle = do
         _ -> throwIO $ NatsException "Incorrect input from server"
             
 -- | Open and authenticate a connection
-prepareConnection :: Nats -> IO ()
-prepareConnection nats = do
-    handle <- connectToServer (natsHost nats) (natsPort nats)
+prepareConnection :: Nats -> (String, Int) -> IO ()
+prepareConnection nats (host, port) = do
+    handle <- connectToServer host port
     authenticate nats handle
-    (_, _, _, csig) <- takeMVar (natsRuntime nats)
-    putMVar (natsRuntime nats) (handle, D.empty, True, undefined)
+    csig <- modifyMVar (natsRuntime nats) $ \(_,_,_, csig) ->
+        return $ ((handle, D.empty, True, undefined), csig)
     putMVar csig ()
 
 -- | Main thread that reads events from NATS server and reconnects if necessary
-connectionThread :: Nats -> IO ()
-connectionThread nats = do
-    connectionHandler nats 
+connectionThread :: Nats
+                    -> [(String, Int)] -- ^ inifinite list of connections to try
+                    -> IO ()
+connectionThread nats (thisconn:restconn) = do
+    connectionHandler nats thisconn
         `catch` errorHandler
         `catch` finalHandler
     where
@@ -376,32 +401,38 @@ connectionThread nats = do
             hClose handle
             -- Call appropriate callbacks on unfinished calls
             FOLD.mapM_ (\f -> f $ Just (T.pack $ show e)) queue
+            -- Call user supplied disconnect
+            (natsOnDisconnect $ natsSettings nats) nats
             
         errorHandler :: IOException -> IO ()
         errorHandler e = do
             finalize e
-            tryToConnect 
+            newconnlist <- tryToConnect restconn
             -- Restart
-            connectionThread nats
+            connectionThread nats newconnlist
             where
-                tryToConnect = do
-                    threadDelay 5000000
-                    prepareConnection nats 
-                        `catch` ((\_ -> tryToConnect) :: IOException -> IO ())
-                        `catch` ((\_ -> tryToConnect) :: NatsException -> IO ())
+                tryToConnect connlist@(conn:rest) = do
+                    ((prepareConnection nats conn) >> return connlist)
+                        `catch` ((\_ -> delay >> tryToConnect rest) :: IOException -> IO [(String, Int)])
+                        `catch` ((\_ -> delay >> tryToConnect rest) :: NatsException -> IO [(String, Int)])
+                delay = threadDelay 1000000
                         
         -- Handler for exiting the thread
         finalHandler :: AsyncException -> IO ()
         finalHandler e = finalize e
 
-connectionHandler :: Nats -> IO ()
-connectionHandler nats = do
+connectionHandler :: Nats -> (String, Int) -> IO ()
+connectionHandler nats (host, port) = do
     (handle, _, _, _) <- readMVar (natsRuntime nats)
     -- Subscribe channels that are supposed to be subscribed
     subscriptions <- readIORef (natsSubMap nats)
     FOLD.forM_ subscriptions $ \(NatsSubscription subject queue _ sid) ->
         sendMessage nats True (NatsClntSubscribe subject sid queue) Nothing
+        
+    -- Call user function that we are successfully connected
+    (natsOnConnect $ natsSettings nats) nats (host, port)
     -- Perform the job
+    
     forever $ 
         let
             -- | Pull callback for OK/ERR status from FIFO queue
@@ -426,7 +457,10 @@ connectionHandler nats = do
             handleMessage (NatsSvrMsg {..}) = do
                 msubscription <- Map.lookup msgSid <$> readIORef (natsSubMap nats)
                 case msubscription of
-                     Just subscription -> (subCallback subscription) msgSid msgSubject (BL.fromChunks [msgText]) msgReply
+                     Just subscription -> 
+                        (subCallback subscription) msgSid msgSubject (BL.fromChunks [msgText]) msgReply
+                        `catch`
+                            (\(e :: SomeException) -> putStrLn $ (show e))
                      -- SID not found in map, force unsubscribe
                      Nothing -> sendMessage nats True (NatsClntUnsubscribe msgSid) Nothing 
         in do
@@ -459,26 +493,40 @@ connect uri = do
                                           takeWhile (\x -> x /= '@') $ drop 1 $ dropWhile (\x -> x /= ':') uriUserInfo
                                           )
                 Nothing -> error "Missing hostname section"
+    connectSettings defaultSettings{
+            natsHosts=[(host, port)],
+            natsUser=user,
+            natsPassword=password
+        }
 
+-- | Connect to NATS server using custom settings
+connectSettings :: NatsSettings -> IO Nats                
+connectSettings settings = do
     csig <- newEmptyMVar
     mruntime <- newMVar (undefined, undefined, False, csig)
     mthreadid <- newEmptyMVar 
     nextsid <- newIORef 1
     submap <- newIORef Map.empty
-    let opts = defaultConnectionOptions{natsConnUser=T.pack user, natsConnPass=T.pack password} 
-    let nats = Nats{
-        natsConnOptions=opts 
-        , natsHost=host 
-        , natsPort=port 
-        , natsRuntime=mruntime 
-        , natsThreadId=mthreadid 
-        , natsNextSid=nextsid 
-        , natsSubMap=submap
+    let opts = defaultConnectionOptions{natsConnUser=(natsUser settings), natsConnPass=(natsPassword settings)} 
+        nats = Nats{
+            natsConnOptions=opts 
+            , natsSettings=settings
+            , natsRuntime=mruntime 
+            , natsThreadId=mthreadid 
+            , natsNextSid=nextsid 
+            , natsSubMap=submap
         }
-    prepareConnection nats
-    threadid <- forkIO $ connectionThread nats
+        hosts = (natsHosts settings)
+    
+    -- Try to connect to all until one succeeds
+    connhost <- tryUntilSuccess hosts $ prepareConnection nats
+    threadid <- forkIO $ connectionThread nats (connhost:(cycle hosts))
     putMVar mthreadid threadid
     return nats
+    where
+        tryUntilSuccess [a] f = f a >> return a
+        tryUntilSuccess (a:rest) f = (f a >> return a) `catch` (\(e :: SomeException) -> tryUntilSuccess rest f)
+        tryUntilSuccess [] f = error "Empty list"
     
 -- | Subscribe to a channel, optionally specifying queue group 
 subscribe :: Nats 

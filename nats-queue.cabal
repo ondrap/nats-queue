@@ -33,4 +33,4 @@ library
                      PatternGuards
                      DeriveDataTypeable
                      Rank2Types
-                     
+                     ScopedTypeVariables
