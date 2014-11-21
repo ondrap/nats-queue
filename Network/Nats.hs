@@ -80,7 +80,7 @@ import Data.Dequeue as D
 import Control.Applicative ((<$>))
 import Data.Typeable
 import qualified Data.Foldable as FOLD
-import Control.Exception (bracket, bracketOnError, throwIO, catch, IOException, AsyncException, Exception)
+import Control.Exception (bracket, bracketOnError, throwIO, catch, IOException, AsyncException, Exception, SomeException)
 import System.Random (randomRIO)
 import Data.IORef
 
@@ -486,21 +486,28 @@ subscribe :: Nats
     -> (Maybe String) -- ^ Queue
     -> MsgCallback -- ^ Callback
     -> IO NatsSID -- ^ SID of subscription
-subscribe nats subject queue cb = do
-    let ssubject = makeSubject subject
-    let squeue = makeSubject `fmap` queue
-    mvar <- newEmptyMVar :: IO (MVar (Maybe T.Text))
-    sid <- newNatsSid nats
-    sendMessage nats True (NatsClntSubscribe ssubject sid squeue) $ Just $ \err -> do
-        case err of
-            Just _ -> return ()
-            Nothing -> atomicModifyIORef' (natsSubMap nats) $ \ioref ->
-                (Map.insert sid (NatsSubscription{subSubject=ssubject, subQueue=squeue, subCallback=cb, subSid=sid}) ioref, ()) 
-        putMVar mvar err
-    merr <- takeMVar mvar
-    case merr of
-         Just err -> throwIO $ NatsException $ T.unpack err
-         Nothing -> return $ sid
+subscribe nats subject queue cb = 
+    let
+        ssubject = makeSubject subject
+        squeue = makeSubject `fmap` queue
+        addToSubTable sid = atomicModifyIORef' (natsSubMap nats) $ \submap ->
+                (Map.insert sid (NatsSubscription{subSubject=ssubject, subQueue=squeue, subCallback=cb, subSid=sid}) submap, ()) 
+        removeFromSubTable sid = atomicModifyIORef' (natsSubMap nats) $ \submap ->
+                (Map.delete sid submap, ()) 
+    in do
+        mvar <- newEmptyMVar :: IO (MVar (Maybe T.Text))
+        sid <- newNatsSid nats
+        bracketOnError
+            (addToSubTable sid)
+            (const $ removeFromSubTable sid)
+            (\_ -> do
+                sendMessage nats True (NatsClntSubscribe ssubject sid squeue) 
+                    $ Just (putMVar mvar) -- Just put a result of operation to mvar
+                merr <- takeMVar mvar
+                case merr of
+                    Just err -> throwIO $ NatsException $ T.unpack err
+                    Nothing -> return $ sid
+            )
 
 -- | Unsubscribe from a channel
 unsubscribe :: Nats 
