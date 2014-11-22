@@ -24,7 +24,8 @@ source-repository head
 library
   exposed-modules:   Network.Nats, Network.Nats.Json
   build-depends:     base==4.*, network>=2.6, dequeue, random, network-uri>=2.6,
-                     containers >= 0.5, bytestring, text, aeson >= 0.7
+                     containers >= 0.5, bytestring, text, aeson >= 0.7,
+                     time, transformers
   ghc-options:       -Wall
   extensions:        TemplateHaskell
                      OverloadedStrings

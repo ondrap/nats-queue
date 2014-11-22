@@ -9,14 +9,14 @@ Haskell API for NATS messaging system (see https://github.com/derekcollison/nats
   for timeouts as in other language API.
 * There is no automatic unsubscribe after certain number of messages as this
   is easily handled by other means.
-* The functions `unsubscribe` and `publish` will not fail; they may block
-  on the network communication. They will not block and not throw an exception 
-  if the client is disconnected from the server. (NATS does not guarantee delivery anyway)
+* The functions `unsubscribe` and `publish` will not fail. They may take up to
+  1 second if there is a problem with network connection. They will not block and not 
+  throw an exception if the client is disconnected from the server. 
+  (NATS does not guarantee delivery anyway)
 * Clustered NATS is supported. NATS servers can be specified by overriding defaultSettings.
   Upon failure, the background thread automatically reconnects to the next available 
-  server.
-* The module currently does not try to ping the server to find out if it is alive.
-  It responds to pings sent by the NATS server correctly.
+  server. Rejected connections and unresponsive servers are handled by closing
+  current connection and trying next server (the timeout is 1 second).
 
 Example use:
 

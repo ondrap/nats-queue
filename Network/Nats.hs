@@ -35,12 +35,12 @@ module Network.Nats (
     -- server usually closes the connection when there is an error.
     
     -- * Comparison to API in other languages
-    -- |Compared to API in other languages, the Haskell binding is very sparse. It does
+    -- |Compared to API in other languages, the Haskell binding does
     -- not implement timeouts and automatic unsubscribing, the 'request' call is implemented
     -- as a synchronous call. 
     --
     -- The timeouts can be easily implemented using 'System.Timeout' module, automatic unsubscribing
-    -- can be easily done in the callback function.
+    -- can be done in the callback function.
     
     -- * Error behaviour
     -- |The 'connect' function tries to connect to the NATS server. In case of failure it immediately fails.
@@ -95,6 +95,7 @@ import Data.IORef
 import System.Timeout
 import Control.Monad.Trans.Maybe
 import Control.Monad.Trans.Class (lift)
+import Data.Time.Clock (getCurrentTime, diffUTCTime, UTCTime)
 
 import qualified Data.Map.Strict as Map
 import qualified Data.ByteString.Lazy.Char8 as BL
@@ -113,6 +114,7 @@ pingInterval :: Int
 pingInterval = 1000000
 
 -- | Timeout interval for connect operations
+timeoutInterval :: Int
 timeoutInterval = 1000000
 
 -- | NATS communication error
@@ -199,7 +201,7 @@ data NatsSettings = NatsSettings {
       , natsUser :: String            -- ^ Username for authentication
       , natsPassword :: String        -- ^ Password for authentication
       , natsOnConnect :: Nats -> (String, Int) -> IO ()  -- ^ Called when a client has successfully connected
-      , natsOnDisconnect :: Nats -> IO ()                -- ^ Called when a client was disconnected
+      , natsOnDisconnect :: Nats -> String -> IO ()      -- ^ Called when a client was disconnected, parameter is Reason
     }
 
 defaultSettings :: NatsSettings
@@ -208,7 +210,7 @@ defaultSettings = (NatsSettings {
       , natsUser = "nats"
       , natsPassword = "nats"
       , natsOnConnect = \_ _ -> (return ())
-      , natsOnDisconnect = const (return ())
+      , natsOnDisconnect = \_ _ -> (return ())
     })
     
 -- | Message received by the client from the server
@@ -413,15 +415,18 @@ prepareConnection nats (host, port) = timeoutThrow timeoutInterval $
 connectionThread :: Nats
                     -> [(String, Int)] -- ^ inifinite list of connections to try
                     -> IO ()
+connectionThread _ [] = error "Empty list of connections"
 connectionThread nats (thisconn:nextconn) = do
     mnewconnlist <- 
         (connectionHandler nats thisconn >> return Nothing) -- connectionHandler never returns...
-            `catches` [Handler (\e -> Just <$> errorHandler e),
+            `catches` [Handler (\(e :: IOException) -> Just <$> errorHandler e),
+                       Handler (\(e :: NatsException) -> Just <$> errorHandler e),
                        Handler (\e -> finalHandler e >> return Nothing)]
     case mnewconnlist of
          Nothing -> return ()
          Just newconnlist -> connectionThread nats newconnlist
     where
+        finalize :: (Show e) => e -> IO ()
         finalize e = do
             -- Hide existing connection
             (handle, queue, _, _) <- takeMVar (natsRuntime nats)
@@ -432,9 +437,9 @@ connectionThread nats (thisconn:nextconn) = do
             -- Call appropriate callbacks on unfinished calls
             FOLD.mapM_ (\f -> f $ Just (T.pack $ show e)) queue
             -- Call user supplied disconnect
-            (natsOnDisconnect $ natsSettings nats) nats
+            (natsOnDisconnect $ natsSettings nats) nats (show e)
             
-        errorHandler :: IOException -> IO [(String, Int)]
+        errorHandler :: (Show e) => e -> IO [(String, Int)]
         errorHandler e = do
             finalize e
             tryToConnect nextconn
@@ -446,6 +451,7 @@ connectionThread nats (thisconn:nextconn) = do
                     case res of
                          Just restlist -> return restlist
                          Nothing       -> threadDelay timeoutInterval >> tryToConnect rest
+                tryToConnect [] = error "Empty list of connections"
                         
         -- Handler for exiting the thread
         finalHandler :: AsyncException -> IO ()
@@ -458,12 +464,14 @@ connectionHandler nats (host, port) = do
     (handle, _, _, _) <- readMVar (natsRuntime nats)
     -- Subscribe channels that are supposed to be subscribed
     subscriptions <- readIORef (natsSubMap nats)
-    timeoutThrow timeoutInterval $ do
-        FOLD.forM_ subscriptions $ \(NatsSubscription subject queue _ sid) ->
-            sendMessage nats True (NatsClntSubscribe subject sid queue) Nothing
+    FOLD.forM_ subscriptions $ \(NatsSubscription subject queue _ sid) ->
+        sendMessage nats True (NatsClntSubscribe subject sid queue) Nothing
         
     -- Call user function that we are successfully connected
     (natsOnConnect $ natsSettings nats) nats (host, port)
+    -- Allocate structures for PING, IORef is probably easiest to manage
+    pingStatus <- getCurrentTime >>= \now -> newIORef ((now, 0, 0) :: (UTCTime, Int, Int))
+    
     -- Perform the job
     forever $ 
         let
@@ -472,7 +480,10 @@ connectionHandler nats (host, port) = do
                 where
                     (item, newq) = D.popFront queue
             handleMessage NatsSvrPing = sendMessage nats True NatsClntPong Nothing
-            handleMessage NatsSvrPong = return ()
+            handleMessage NatsSvrPong = 
+                atomicModifyIORef' pingStatus $ 
+                    \(time, pings, pongs) -> ((time, pings, pongs + 1), ())
+                
             handleMessage NatsSvrOK = do
                 cb <- modifyMVar (natsRuntime nats) $ popCb
                 case cb of
@@ -495,9 +506,22 @@ connectionHandler nats (host, port) = do
                             (\(e :: SomeException) -> putStrLn $ (show e))
                      -- SID not found in map, force unsubscribe
                      Nothing -> sendMessage nats True (NatsClntUnsubscribe msgSid) Nothing 
+                     
+            -- Sends ping if needed, aborts if we did not get PONG in time
+            checkPingTask = do
+                now <- getCurrentTime
+                (lastPing, pings, pongs) <- readIORef pingStatus
+                if (now `diffUTCTime` lastPing) > 1
+                    then do
+                        if pings /= pongs 
+                           then throwIO (NatsException "Ping timeouted") 
+                           else return ()
+                        sendMessage nats True NatsClntPing Nothing
+                        writeIORef pingStatus (now, pings +1, pongs)
+                    else return ()
         in do
             -- Ping code must be synchronously here because of exception handling
-            runMaybeT $ do
+            _ <- runMaybeT $ do
                 line <- MaybeT $ timeout pingInterval $ BS.hGetLine handle
                 decoded <- MaybeT $ return $ decodeMessage line
                 lift $ case decoded of
@@ -508,7 +532,7 @@ connectionHandler nats (host, port) = do
                         handleMessage msg{msgText=BS.take paylen payload}
                     _ -> 
                         putStrLn $ "Incorrect message: " ++ (show line)
-            -- checkPingTask
+            checkPingTask
                         
 -- | Connect to a NATS server    
 connect :: String -- ^ URI with format: nats:\/\/user:password\@localhost:4222
@@ -560,8 +584,8 @@ connectSettings settings = do
     return nats
     where
         tryUntilSuccess [a] f = f a >> return a
-        tryUntilSuccess (a:rest) f = (f a >> return a) `catch` (\(e :: SomeException) -> tryUntilSuccess rest f)
-        tryUntilSuccess [] f = error "Empty list"
+        tryUntilSuccess (a:rest) f = (f a >> return a) `catch` (\(_ :: SomeException) -> tryUntilSuccess rest f)
+        tryUntilSuccess [] _ = error "Empty list"
     
 -- | Subscribe to a channel, optionally specifying queue group 
 subscribe :: Nats 
