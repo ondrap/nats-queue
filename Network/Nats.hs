@@ -380,9 +380,13 @@ timeoutThrow t f = do
         
 _sendMessage :: Handle -> NatsClntMessage -> IO ()
 _sendMessage handle cmsg = timeoutThrow timeoutInterval $ do
-    -- TODO: We should change this to something using writev (Socket.sendMany)
-    BL.hPut handle $ makeClntMsg cmsg
-    BS.hPut handle "\r\n"
+    let msg = makeClntMsg cmsg
+    case () of
+       _| BL.length msg < 1024 ->
+                BS.hPut handle $ BS.concat $ (BL.toChunks msg) ++ ["\r\n"]
+        | True -> do
+                BL.hPut handle msg
+                BS.hPut handle "\r\n"
 
 -- | Do the authentication handshake if necessary
 authenticate :: Nats -> Handle -> IO ()
