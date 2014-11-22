@@ -105,6 +105,13 @@ import Data.Aeson.TH (deriveJSON, defaultOptions, fieldLabelModifier)
 
 import qualified Network.URI as URI
 
+-- | How often should we ping the server
+pingInterval :: Int
+pingInterval = 1000000
+
+-- | Timeout interval for connect operations
+timeoutInterval = 1000000
+
 -- | NATS communication error
 data NatsException = NatsException String
     deriving (Show, Typeable)
@@ -358,8 +365,13 @@ sendMessage nats blockIfDisconnected msg mcb
 
 _sendMessage :: Handle -> NatsClntMessage -> IO ()
 _sendMessage handle cmsg = do
-    BL.hPut handle $ makeClntMsg cmsg
-    BS.hPut handle "\r\n"
+    res <- timeout timeoutInterval $ do
+        -- TODO: We should change this to something using writev (Socket.sendMany)
+        BL.hPut handle $ makeClntMsg cmsg
+        BS.hPut handle "\r\n"
+    case res of
+        Just _ -> return ()
+        Nothing -> throwIO $ NatsException "Timeout sending data"
 
 -- | Do the authentication handshake if necessary
 authenticate :: Nats -> Handle -> IO ()
@@ -380,7 +392,7 @@ authenticate nats handle = do
 -- | Open and authenticate a connection
 prepareConnection :: Nats -> (String, Int) -> IO ()
 prepareConnection nats (host, port) = do
-    res <- timeout 1000000 $ bracketOnError
+    res <- timeout timeoutInterval $ bracketOnError
         (connectToServer host port)
         (hClose)
         (\handle -> do
@@ -396,11 +408,13 @@ connectionThread :: Nats
                     -> [(String, Int)] -- ^ inifinite list of connections to try
                     -> IO ()
 connectionThread nats (thisconn:nextconn) = do
-    newconnlist <- 
+    mnewconnlist <- 
         (connectionHandler nats thisconn >> return Nothing) -- connectionHandler never returns...
             `catches` [Handler (\e -> Just <$> errorHandler e),
                        Handler (\e -> finalHandler e >> return Nothing)]
-    maybe (return ()) (connectionThread nats) newconnlist
+    case mnewconnlist of
+         Nothing -> return ()
+         Just newconnlist -> connectionThread nats newconnlist
     where
         finalize e = do
             -- Hide existing connection
@@ -425,19 +439,20 @@ connectionThread nats (thisconn:nextconn) = do
                                     Handler (\(_ :: NatsException) -> return Nothing) ]
                     case res of
                          Just restlist -> return restlist
-                         Nothing       -> threadDelay 1000000 >> tryToConnect rest
+                         Nothing       -> threadDelay timeoutInterval >> tryToConnect rest
                         
         -- Handler for exiting the thread
         finalHandler :: AsyncException -> IO ()
         finalHandler e = do
             finalize e
 
+-- | Forever read input from a connection and process it
 connectionHandler :: Nats -> (String, Int) -> IO ()
 connectionHandler nats (host, port) = do
     (handle, _, _, _) <- readMVar (natsRuntime nats)
     -- Subscribe channels that are supposed to be subscribed
     subscriptions <- readIORef (natsSubMap nats)
-    res <- timeout 1000000 $ do
+    res <- timeout timeoutInterval $ do
         FOLD.forM_ subscriptions $ \(NatsSubscription subject queue _ sid) ->
             sendMessage nats True (NatsClntSubscribe subject sid queue) Nothing
     maybe (throwIO $ NatsException "Timeout autosubscribing channels.") (return) res
@@ -476,6 +491,8 @@ connectionHandler nats (host, port) = do
                      -- SID not found in map, force unsubscribe
                      Nothing -> sendMessage nats True (NatsClntUnsubscribe msgSid) Nothing 
         in do
+            -- Ping code must be synchronously here because of exception handling
+            -- TODO
             line <- BS.hGetLine handle
             case (decodeMessage line) of
                     Just (msg, Nothing) -> do
@@ -578,7 +595,9 @@ unsubscribe nats sid = do
     atomicModifyIORef' (natsSubMap nats) $ \ioref -> (Map.delete sid ioref, ())
     -- Unsubscribe from server, ignore errors
     sendMessage nats False (NatsClntUnsubscribe sid) Nothing
-        `catch` ((\_ -> return ()) :: IOException -> IO ())
+        `catches` [ Handler (\(_ :: IOException) -> return ()),
+                    Handler (\(_ :: NatsException) -> return ()) ]
+            
 
 -- | Synchronous request/response communication
 request :: Nats 
@@ -613,7 +632,8 @@ publish :: Nats
 publish nats subject body = do
     -- Ignore errors - messages can get lost
     sendMessage nats False (NatsClntPublish (makeSubject subject) Nothing body) Nothing
-        `catch` ((\_ -> return()) :: IOException -> IO ())
+        `catches` [ Handler (\(_ :: IOException) -> return ()),
+                    Handler (\(_ :: NatsException) -> return ()) ]
     
 -- | Disconnect from a NATS server
 disconnect :: Nats -> IO ()
