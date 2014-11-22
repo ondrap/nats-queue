@@ -90,6 +90,7 @@ import qualified Data.Foldable as FOLD
 import Control.Exception (bracket, bracketOnError, throwIO, catch, IOException, AsyncException, Exception, SomeException)
 import System.Random (randomRIO)
 import Data.IORef
+import System.Timeout
 
 import qualified Data.Map.Strict as Map
 import qualified Data.ByteString.Lazy.Char8 as BL
@@ -288,6 +289,7 @@ connectToServer hostname port = do
         (S.socket (S.addrFamily serveraddr) S.Stream S.defaultProtocol)
         (S.sClose)
         (\sock -> do
+            
             setSocketOption sock KeepAlive 1
             let connaddr = case (S.addrAddress serveraddr) of
                     SockAddrInet _ haddr -> SockAddrInet (fromInteger $ toInteger port) haddr
@@ -377,11 +379,16 @@ authenticate nats handle = do
 -- | Open and authenticate a connection
 prepareConnection :: Nats -> (String, Int) -> IO ()
 prepareConnection nats (host, port) = do
-    handle <- connectToServer host port
-    authenticate nats handle
-    csig <- modifyMVar (natsRuntime nats) $ \(_,_,_, csig) ->
-        return $ ((handle, D.empty, True, undefined), csig)
-    putMVar csig ()
+    res <- timeout 1000000 $ bracketOnError
+        (connectToServer host port)
+        (hClose)
+        (\handle -> do
+            authenticate nats handle
+            csig <- modifyMVar (natsRuntime nats) $ \(_,_,_, csig) ->
+                return $ ((handle, D.empty, True, undefined), csig)
+            putMVar csig ()
+        )
+    maybe (throwIO $ NatsException "Timeout connecting to server") (return) res
 
 -- | Main thread that reads events from NATS server and reconnects if necessary
 connectionThread :: Nats
@@ -426,8 +433,10 @@ connectionHandler nats (host, port) = do
     (handle, _, _, _) <- readMVar (natsRuntime nats)
     -- Subscribe channels that are supposed to be subscribed
     subscriptions <- readIORef (natsSubMap nats)
-    FOLD.forM_ subscriptions $ \(NatsSubscription subject queue _ sid) ->
-        sendMessage nats True (NatsClntSubscribe subject sid queue) Nothing
+    res <- timeout 1000000 $ do
+        FOLD.forM_ subscriptions $ \(NatsSubscription subject queue _ sid) ->
+            sendMessage nats True (NatsClntSubscribe subject sid queue) Nothing
+    maybe (throwIO $ NatsException "Timeout autosubscribing channels.") (return) res
         
     -- Call user function that we are successfully connected
     (natsOnConnect $ natsSettings nats) nats (host, port)
