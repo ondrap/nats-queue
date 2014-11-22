@@ -87,7 +87,8 @@ import Data.Dequeue as D
 import Control.Applicative ((<$>))
 import Data.Typeable
 import qualified Data.Foldable as FOLD
-import Control.Exception (bracket, bracketOnError, throwIO, catch, IOException, AsyncException, Exception, SomeException)
+import Control.Exception (bracket, bracketOnError, throwIO, catch, IOException, AsyncException, Exception, SomeException,
+                          catches, Handler(..))
 import System.Random (randomRIO)
 import Data.IORef
 import System.Timeout
@@ -394,10 +395,12 @@ prepareConnection nats (host, port) = do
 connectionThread :: Nats
                     -> [(String, Int)] -- ^ inifinite list of connections to try
                     -> IO ()
-connectionThread nats (thisconn:restconn) = do
-    connectionHandler nats thisconn
-        `catch` errorHandler
-        `catch` finalHandler
+connectionThread nats (thisconn:nextconn) = do
+    newconnlist <- 
+        (connectionHandler nats thisconn >> return Nothing) -- connectionHandler never returns...
+            `catches` [Handler (\e -> Just <$> errorHandler e),
+                       Handler (\e -> finalHandler e >> return Nothing)]
+    maybe (return ()) (connectionThread nats) newconnlist
     where
         finalize e = do
             -- Hide existing connection
@@ -411,22 +414,23 @@ connectionThread nats (thisconn:restconn) = do
             -- Call user supplied disconnect
             (natsOnDisconnect $ natsSettings nats) nats
             
-        errorHandler :: IOException -> IO ()
+        errorHandler :: IOException -> IO [(String, Int)]
         errorHandler e = do
             finalize e
-            newconnlist <- tryToConnect restconn
-            -- Restart
-            connectionThread nats newconnlist
+            tryToConnect nextconn
             where
                 tryToConnect connlist@(conn:rest) = do
-                    ((prepareConnection nats conn) >> return connlist)
-                        `catch` ((\_ -> delay >> tryToConnect rest) :: IOException -> IO [(String, Int)])
-                        `catch` ((\_ -> delay >> tryToConnect rest) :: NatsException -> IO [(String, Int)])
-                delay = threadDelay 1000000
+                    res <- ((prepareConnection nats conn) >> (return $ Just connlist))
+                        `catches` [ Handler (\(_ :: IOException) -> return Nothing),
+                                    Handler (\(_ :: NatsException) -> return Nothing) ]
+                    case res of
+                         Just restlist -> return restlist
+                         Nothing       -> threadDelay 1000000 >> tryToConnect rest
                         
         -- Handler for exiting the thread
         finalHandler :: AsyncException -> IO ()
-        finalHandler e = finalize e
+        finalHandler e = do
+            finalize e
 
 connectionHandler :: Nats -> (String, Int) -> IO ()
 connectionHandler nats (host, port) = do
@@ -441,7 +445,6 @@ connectionHandler nats (host, port) = do
     -- Call user function that we are successfully connected
     (natsOnConnect $ natsSettings nats) nats (host, port)
     -- Perform the job
-    
     forever $ 
         let
             -- | Pull callback for OK/ERR status from FIFO queue
