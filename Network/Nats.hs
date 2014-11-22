@@ -73,6 +73,7 @@ module Network.Nats (
     , unsubscribe
     , publish
     , request
+    , requestMany
     -- * Termination
     , disconnect
 ) where
@@ -627,7 +628,7 @@ unsubscribe nats sid = do
                     Handler (\(_ :: NatsException) -> return ()) ]
             
 
--- | Synchronous request/response communication
+-- | Synchronous request/response communication to obtain one message
 request :: Nats 
     -> String             -- ^ Subject
     -> BL.ByteString      -- ^ Request
@@ -640,7 +641,7 @@ request nats subject body = do
                 _ <- tryPutMVar mvar (Right response)
                 return ()
             ) 
-            (\sid -> unsubscribe nats sid)
+            (unsubscribe nats)
             (\_ -> do
                 sendMessage nats True (NatsClntPublish (makeSubject subject) (Just $ makeSubject inbox) body) $ Just $ \merr -> do
                     case merr of
@@ -652,14 +653,41 @@ request nats subject body = do
                      Right res -> return $ res
             )
 
+-- | Synchronous request/response for obtaining many messages in certain timespan
+requestMany :: Nats
+    -> String              -- ^ Subject
+    -> BL.ByteString       -- ^ Body
+    -> Int                 -- ^ Timeout in microseconds
+    -> IO [BL.ByteString]
+requestMany nats subject body time = do
+    result <- newIORef []
+    inbox <- newInbox
+    bracket 
+        (subscribe nats inbox Nothing $ \_ _ response _ ->
+                atomicModifyIORef result $ \old -> (response:old, ())
+        )
+        (unsubscribe nats)
+        (\_ -> do
+            publish' nats subject (Just inbox) body
+            threadDelay time
+        )
+    reverse <$> readIORef result
+            
 -- | Publish a message
 publish :: Nats 
     -> String -- ^ Subject
     -> BL.ByteString -- ^ Data
     -> IO ()
-publish nats subject body = do
+publish nats subject body = publish' nats subject Nothing body
+    
+publish' :: Nats 
+    -> String -- ^ Subject
+    -> Maybe String
+    -> BL.ByteString -- ^ Data
+    -> IO ()
+publish' nats subject inbox body = do
     -- Ignore errors - messages can get lost
-    sendMessage nats False (NatsClntPublish (makeSubject subject) Nothing body) Nothing
+    sendMessage nats False (NatsClntPublish (makeSubject subject) (makeSubject <$> inbox) body) Nothing
         `catches` [ Handler (\(_ :: IOException) -> return ()),
                     Handler (\(_ :: NatsException) -> return ()) ]
     
