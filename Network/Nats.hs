@@ -201,8 +201,11 @@ data NatsSettings = NatsSettings {
         natsHosts :: [(String, Int)]  -- ^ List of (host,port) NATS servers in a cluster
       , natsUser :: String            -- ^ Username for authentication
       , natsPassword :: String        -- ^ Password for authentication
-      , natsOnConnect :: Nats -> (String, Int) -> IO ()  -- ^ Called when a client has successfully connected
-      , natsOnDisconnect :: Nats -> String -> IO ()      -- ^ Called when a client was disconnected, parameter is Reason
+      , natsOnConnect :: Nats -> (String, Int) -> IO ()  
+        -- ^ Called when a client has successfully connected. This callback is called synchronously
+        --   before the processing of incoming messages begins.
+      , natsOnDisconnect :: Nats -> String -> IO () 
+        -- ^ Called when a client is disconnected.
     }
 
 defaultSettings :: NatsSettings
