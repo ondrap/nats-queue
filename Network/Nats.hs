@@ -111,7 +111,7 @@ import qualified Network.URI as URI
 
 -- | How often should we ping the server
 pingInterval :: Int
-pingInterval = 1000000
+pingInterval = 3000000
 
 -- | Timeout interval for connect operations
 timeoutInterval :: Int
@@ -229,6 +229,7 @@ subjectToStr :: Subject -> String
 subjectToStr (Subject str) = str
 
 makeSubject :: String -> Subject
+makeSubject ""        = error "Empty subject"
 makeSubject str
     | any (<=' ') str = error $ "Subject contains incorrect characters: " ++ str
     | otherwise       = Subject str
