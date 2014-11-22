@@ -54,9 +54,10 @@ module Network.Nats (
     -- After reconnecting to the server, the module automatically resubscribes to previously subscribed channels.
     --
     -- If there is a network failure, the nats commands 'subscribe' and 'request' 
-    -- may fail on a network exception. The 'subscribe'
+    -- may fail on an IOexception or NatsException. The 'subscribe'
     -- command is synchronous, it waits until the server responds with +OK. The commands 'publish'
-    -- and 'unsubscribe' are asynchronous, no confirmation from server is required.
+    -- and 'unsubscribe' are asynchronous, no confirmation from server is required and they 
+    -- should not raise an exception.
     --
     Nats
     , NatsSID
@@ -92,6 +93,8 @@ import Control.Exception (bracket, bracketOnError, throwIO, catch, IOException, 
 import System.Random (randomRIO)
 import Data.IORef
 import System.Timeout
+import Control.Monad.Trans.Maybe
+import Control.Monad.Trans.Class (lift)
 
 import qualified Data.Map.Strict as Map
 import qualified Data.ByteString.Lazy.Char8 as BL
@@ -363,15 +366,19 @@ sendMessage nats blockIfDisconnected msg mcb
         supportsCallback (NatsClntUnsubscribe {}) = True
         supportsCallback _ = False
 
-_sendMessage :: Handle -> NatsClntMessage -> IO ()
-_sendMessage handle cmsg = do
-    res <- timeout timeoutInterval $ do
-        -- TODO: We should change this to something using writev (Socket.sendMany)
-        BL.hPut handle $ makeClntMsg cmsg
-        BS.hPut handle "\r\n"
+-- Throw exception if an action does not end in specified time
+timeoutThrow :: Int -> IO a -> IO a
+timeoutThrow t f = do
+    res <- timeout t f
     case res of
-        Just _ -> return ()
-        Nothing -> throwIO $ NatsException "Timeout sending data"
+         Just x -> return x
+         Nothing -> throwIO $ NatsException "Reached timeout"
+        
+_sendMessage :: Handle -> NatsClntMessage -> IO ()
+_sendMessage handle cmsg = timeoutThrow timeoutInterval $ do
+    -- TODO: We should change this to something using writev (Socket.sendMany)
+    BL.hPut handle $ makeClntMsg cmsg
+    BS.hPut handle "\r\n"
 
 -- | Do the authentication handshake if necessary
 authenticate :: Nats -> Handle -> IO ()
@@ -391,8 +398,8 @@ authenticate nats handle = do
             
 -- | Open and authenticate a connection
 prepareConnection :: Nats -> (String, Int) -> IO ()
-prepareConnection nats (host, port) = do
-    res <- timeout timeoutInterval $ bracketOnError
+prepareConnection nats (host, port) = timeoutThrow timeoutInterval $
+    bracketOnError
         (connectToServer host port)
         (hClose)
         (\handle -> do
@@ -401,7 +408,6 @@ prepareConnection nats (host, port) = do
                 return $ ((handle, D.empty, True, undefined), csig)
             putMVar csig ()
         )
-    maybe (throwIO $ NatsException "Timeout connecting to server") (return) res
 
 -- | Main thread that reads events from NATS server and reconnects if necessary
 connectionThread :: Nats
@@ -452,10 +458,9 @@ connectionHandler nats (host, port) = do
     (handle, _, _, _) <- readMVar (natsRuntime nats)
     -- Subscribe channels that are supposed to be subscribed
     subscriptions <- readIORef (natsSubMap nats)
-    res <- timeout timeoutInterval $ do
+    timeoutThrow timeoutInterval $ do
         FOLD.forM_ subscriptions $ \(NatsSubscription subject queue _ sid) ->
             sendMessage nats True (NatsClntSubscribe subject sid queue) Nothing
-    maybe (throwIO $ NatsException "Timeout autosubscribing channels.") (return) res
         
     -- Call user function that we are successfully connected
     (natsOnConnect $ natsSettings nats) nats (host, port)
@@ -492,17 +497,18 @@ connectionHandler nats (host, port) = do
                      Nothing -> sendMessage nats True (NatsClntUnsubscribe msgSid) Nothing 
         in do
             -- Ping code must be synchronously here because of exception handling
-            -- TODO
-            line <- BS.hGetLine handle
-            case (decodeMessage line) of
-                    Just (msg, Nothing) -> do
+            runMaybeT $ do
+                line <- MaybeT $ timeout pingInterval $ BS.hGetLine handle
+                decoded <- MaybeT $ return $ decodeMessage line
+                lift $ case decoded of
+                    (msg, Nothing) -> 
                         handleMessage msg
-                    Just (msg@(NatsSvrMsg {}), Just paylen) -> do
-                        payload <- BS.hGet handle paylen
-                        _ <- BS.hGet handle 2 -- CRLF
-                        handleMessage msg{msgText=payload}
+                    (msg@(NatsSvrMsg {}), Just paylen) -> do
+                        payload <- BS.hGet handle (paylen + 2) -- +2 = CRLF
+                        handleMessage msg{msgText=BS.take paylen payload}
                     _ -> 
                         putStrLn $ "Incorrect message: " ++ (show line)
+            -- checkPingTask
                         
 -- | Connect to a NATS server    
 connect :: String -- ^ URI with format: nats:\/\/user:password\@localhost:4222
