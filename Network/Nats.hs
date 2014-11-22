@@ -144,10 +144,10 @@ $(deriveJSON defaultOptions{fieldLabelModifier =(
     
 -- | Server information sent usually upon opening a connection to NATS server
 data NatsServerInfo = NatsServerInfo {
-    natsSvrServerId :: T.Text
-    , natsSvrVersion :: T.Text
-    , natsSvrMaxPayload :: Int
-    , natsSvrAuthRequired :: Bool
+--     natsSvrServerId :: T.Text
+--     , natsSvrVersion :: T.Text
+--     , natsSvrMaxPayload :: Int
+      natsSvrAuthRequired :: Bool
     } deriving (Show)
     
 $(deriveJSON defaultOptions{fieldLabelModifier =(
@@ -260,11 +260,9 @@ makeClntMsg = BL.fromChunks . _makeClntMsg
     
 -- | Decode NATS server message; result is message + payload (payload is 'undefined' in NatsSvrMsg)
 decodeMessage :: BS.ByteString -> Maybe (NatsSvrMessage, Maybe Int)
-decodeMessage line = decodeMessage_ mid mpayload
+decodeMessage line = decodeMessage_ mid (BS.drop 1 mrest)
     where 
-        (mid, mpayload) = (BS.takeWhile (\x -> x/=' ' && x/='\r') line, 
-                             BS.drop 1 $ BS.dropWhile (\x -> x/=' ' && x/='\r') line)
-
+        (mid, mrest) = BS.span (\x -> x/=' ' && x/='\r') line
         decodeMessage_ :: BS.ByteString -> BS.ByteString -> Maybe (NatsSvrMessage, Maybe Int)
         decodeMessage_ "PING" _ = Just (NatsSvrPing, Nothing)
         decodeMessage_ "PONG" _ = Just (NatsSvrPong, Nothing)
@@ -274,8 +272,7 @@ decodeMessage line = decodeMessage_ mid mpayload
             info <- AE.decode $ BL.fromChunks [msg]
             return $ (NatsSvrInfo info, Nothing)
         decodeMessage_ "MSG" msg = do
-            let fields = BS.split ' ' msg
-            case (map BS.unpack fields) of
+            case (map BS.unpack (BS.words msg)) of
                  [subj, sid, len] -> return (NatsSvrMsg subj (read sid) undefined Nothing, Just $ read len)
                  [subj, sid, reply, len] -> return (NatsSvrMsg subj (read sid) undefined (Just $ reply), Just $ read len)
                  _ -> fail ""
