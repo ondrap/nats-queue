@@ -83,7 +83,7 @@ import System.IO
 import Control.Concurrent.MVar
 import Control.Concurrent
 import qualified Network.Socket as S
-import Network.Socket (SocketOption(KeepAlive), setSocketOption, getAddrInfo, SockAddr(..))
+import Network.Socket (SocketOption(KeepAlive, NoDelay), setSocketOption, getAddrInfo, SockAddr(..))
 import Control.Monad (forever, replicateM)
 import Data.Dequeue as D
 import Control.Applicative ((<$>))
@@ -306,6 +306,7 @@ connectToServer hostname port = do
         (\sock -> do
             
             setSocketOption sock KeepAlive 1
+            setSocketOption sock NoDelay 1
             let connaddr = case (S.addrAddress serveraddr) of
                     SockAddrInet _ haddr -> SockAddrInet (fromInteger $ toInteger port) haddr
                     SockAddrInet6 _ finfo haddr scopeid -> SockAddrInet6 (fromInteger $ toInteger port) finfo haddr scopeid
