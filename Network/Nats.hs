@@ -63,6 +63,7 @@ module Network.Nats (
     , NatsSID
     , connect
     , connectSettings
+    , NatsHost(..)
     , NatsSettings(..)
     , defaultSettings
     -- * Exceptions
@@ -184,8 +185,7 @@ type FifoQueue = D.BankersDequeue (Maybe T.Text -> IO ())
     
 -- | Control structure representing a connection to NATS server
 data Nats = Nats {
-          natsConnOptions :: NatsConnectionOptions
-        , natsSettings :: NatsSettings
+          natsSettings :: NatsSettings
         , natsRuntime :: MVar (Handle, -- Network socket
                                FifoQueue, -- FIFO of sent commands waiting for ack
                                Bool, -- False if we are disconnected
@@ -196,11 +196,17 @@ data Nats = Nats {
         , natsSubMap :: IORef (Map.Map NatsSID NatsSubscription)
     }
 
+-- | Host settings; may have different username/password for each host
+data NatsHost = NatsHost {
+        natsHHost :: String
+      , natsHPort :: Int
+      , natsHUser :: String      -- ^ Username for authentication
+      , natsHPass :: String  -- ^ Password for authentication
+    }
+    
 -- | Advanced settings for connecting to NATS server
 data NatsSettings = NatsSettings {
-        natsHosts :: [(String, Int)]  -- ^ List of (host,port) NATS servers in a cluster
-      , natsUser :: String            -- ^ Username for authentication
-      , natsPassword :: String        -- ^ Password for authentication
+        natsHosts :: [NatsHost]
       , natsOnConnect :: Nats -> (String, Int) -> IO ()  
         -- ^ Called when a client has successfully connected. This callback is called synchronously
         --   before the processing of incoming messages begins.
@@ -210,9 +216,7 @@ data NatsSettings = NatsSettings {
 
 defaultSettings :: NatsSettings
 defaultSettings = (NatsSettings {
-        natsHosts = [("localhost", 4222)]
-      , natsUser = "nats"
-      , natsPassword = "nats"
+        natsHosts = [(NatsHost "localhost" 4222 "nats" "nats")]
       , natsOnConnect = \_ _ -> (return ())
       , natsOnDisconnect = \_ _ -> (return ())
     })
@@ -390,12 +394,13 @@ _sendMessage handle cmsg = timeoutThrow timeoutInterval $ do
                 BS.hPut handle "\r\n"
 
 -- | Do the authentication handshake if necessary
-authenticate :: Nats -> Handle -> IO ()
-authenticate nats handle = do
+authenticate :: Handle -> String -> String -> IO ()
+authenticate handle user password = do
     info <- BS.hGetLine handle
     case (decodeMessage info) of
         Just (NatsSvrInfo (NatsServerInfo {natsSvrAuthRequired=True}), Nothing) -> do
-            BL.hPut handle $ makeClntMsg (NatsClntConnect $ natsConnOptions nats)
+            let coptions = defaultConnectionOptions{natsConnUser=user, natsConnPass=password}
+            BL.hPut handle $ makeClntMsg (NatsClntConnect coptions)
             BS.hPut handle "\r\n"
             response <- BS.hGetLine handle
             case (decodeMessage response) of
@@ -406,13 +411,13 @@ authenticate nats handle = do
         _ -> throwIO $ NatsException "Incorrect input from server"
             
 -- | Open and authenticate a connection
-prepareConnection :: Nats -> (String, Int) -> IO ()
-prepareConnection nats (host, port) = timeoutThrow timeoutInterval $
+prepareConnection :: Nats -> NatsHost -> IO ()
+prepareConnection nats nhost = timeoutThrow timeoutInterval $
     bracketOnError
-        (connectToServer host port)
+        (connectToServer (natsHHost nhost) (natsHPort nhost))
         (hClose)
         (\handle -> do
-            authenticate nats handle
+            authenticate handle (natsHUser nhost) (natsHPass nhost)
             csig <- modifyMVar (natsRuntime nats) $ \(_,_,_, csig) ->
                 return $ ((handle, D.empty, True, undefined), csig)
             putMVar csig ()
@@ -420,7 +425,7 @@ prepareConnection nats (host, port) = timeoutThrow timeoutInterval $
 
 -- | Main thread that reads events from NATS server and reconnects if necessary
 connectionThread :: Nats
-                    -> [(String, Int)] -- ^ inifinite list of connections to try
+                    -> [NatsHost] -- ^ inifinite list of connections to try
                     -> IO ()
 connectionThread _ [] = error "Empty list of connections"
 connectionThread nats (thisconn:nextconn) = do
@@ -446,7 +451,7 @@ connectionThread nats (thisconn:nextconn) = do
             -- Call user supplied disconnect
             (natsOnDisconnect $ natsSettings nats) nats (show e)
             
-        errorHandler :: (Show e) => e -> IO [(String, Int)]
+        errorHandler :: (Show e) => e -> IO [NatsHost]
         errorHandler e = do
             finalize e
             tryToConnect nextconn
@@ -466,8 +471,8 @@ connectionThread nats (thisconn:nextconn) = do
             finalize e
 
 -- | Forever read input from a connection and process it
-connectionHandler :: Nats -> (String, Int) -> IO ()
-connectionHandler nats (host, port) = do
+connectionHandler :: Nats -> NatsHost -> IO ()
+connectionHandler nats (NatsHost host port _ _) = do
     (handle, _, _, _) <- readMVar (natsRuntime nats)
     -- Subscribe channels that are supposed to be subscribed
     subscriptions <- readIORef (natsSubMap nats)
@@ -501,8 +506,6 @@ connectionHandler nats (host, port) = do
                 case cb of
                      Just f -> f $ Just txt
                      Nothing -> putStrLn $ show txt
-            handleMessage (NatsSvrInfo (NatsServerInfo {natsSvrAuthRequired=True})) = do
-                sendMessage nats True (NatsClntConnect $ natsConnOptions nats) Nothing
             handleMessage (NatsSvrInfo _) = return ()
             handleMessage (NatsSvrMsg {..}) = do
                 msubscription <- Map.lookup msgSid <$> readIORef (natsSubMap nats)
@@ -560,9 +563,7 @@ connect uri = do
                                           )
                 Nothing -> error "Missing hostname section"
     connectSettings defaultSettings{
-            natsHosts=[(host, port)],
-            natsUser=user,
-            natsPassword=password
+            natsHosts=[(NatsHost host port user password)]
         }
 
 -- | Connect to NATS server using custom settings
@@ -573,10 +574,8 @@ connectSettings settings = do
     mthreadid <- newEmptyMVar 
     nextsid <- newIORef 1
     submap <- newIORef Map.empty
-    let opts = defaultConnectionOptions{natsConnUser=(natsUser settings), natsConnPass=(natsPassword settings)} 
-        nats = Nats{
-            natsConnOptions=opts 
-            , natsSettings=settings
+    let nats = Nats{
+              natsSettings=settings
             , natsRuntime=mruntime 
             , natsThreadId=mthreadid 
             , natsNextSid=nextsid 
