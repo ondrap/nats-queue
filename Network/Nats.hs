@@ -95,9 +95,7 @@ import Control.Exception (bracket, bracketOnError, throwIO, catch, IOException, 
 import System.Random (randomRIO)
 import Data.IORef
 import System.Timeout
-import Control.Monad.Trans.Maybe
-import Control.Monad.Trans.Class (lift)
-import Data.Time.Clock (getCurrentTime, diffUTCTime, UTCTime)
+import Control.Concurrent.Async (concurrently)
 
 import qualified Data.Map.Strict as Map
 import qualified Data.ByteString.Lazy.Char8 as BL
@@ -322,7 +320,10 @@ connectToServer hostname port = do
         )
         
         
-ensureConnection :: Nats -> Bool -> ((Handle, FifoQueue) -> IO FifoQueue) -> IO ()
+ensureConnection :: Nats 
+    -> Bool -- ^ If true, wait for the connection to become available
+    -> ((Handle, FifoQueue) -> IO FifoQueue) -- ^ Action to do when the connection is available
+    -> IO ()
 -- Block if we are disconnected
 ensureConnection nats True f = do
     bracketOnError
@@ -435,7 +436,7 @@ connectionThread nats (thisconn:nextconn) = do
                        Handler (\(e :: NatsException) -> Just <$> errorHandler e),
                        Handler (\e -> finalHandler e >> return Nothing)]
     case mnewconnlist of
-         Nothing -> return ()
+         Nothing -> return () -- Never happens
          Just newconnlist -> connectionThread nats newconnlist
     where
         finalize :: (Show e) => e -> IO ()
@@ -470,6 +471,16 @@ connectionThread nats (thisconn:nextconn) = do
         finalHandler e = do
             finalize e
 
+pingerThread :: Nats -> IORef (Int, Int) -> IO ()
+pingerThread nats pingStatus = forever $ do
+    threadDelay pingInterval
+    -- todo - kontrola pingu
+    ok <- atomicModifyIORef' pingStatus $ \(pings, pongs) -> ((pings+1, pongs), pings - pongs < 2)
+    if ok == False
+        then throwIO (NatsException "Ping timeouted") 
+        else return ()
+    sendMessage nats True NatsClntPing Nothing
+        
 -- | Forever read input from a connection and process it
 connectionHandler :: Nats -> NatsHost -> IO ()
 connectionHandler nats (NatsHost host port _ _) = do
@@ -482,67 +493,56 @@ connectionHandler nats (NatsHost host port _ _) = do
     -- Call user function that we are successfully connected
     (natsOnConnect $ natsSettings nats) nats (host, port)
     -- Allocate structures for PING, IORef is probably easiest to manage
-    pingStatus <- getCurrentTime >>= \now -> newIORef ((now, 0, 0) :: (UTCTime, Int, Int))
+    pingStatus <- newIORef (0, 0)
     
     -- Perform the job
-    forever $ 
-        let
-            -- | Pull callback for OK/ERR status from FIFO queue
-            popCb (h, queue, x1, x2) = return ((h, newq, x1, x2), item)
-                where
-                    (item, newq) = D.popFront queue
-            handleMessage NatsSvrPing = sendMessage nats True NatsClntPong Nothing
-            handleMessage NatsSvrPong = 
-                atomicModifyIORef' pingStatus $ 
-                    \(time, pings, pongs) -> ((time, pings, pongs + 1), ())
-                
-            handleMessage NatsSvrOK = do
-                cb <- modifyMVar (natsRuntime nats) $ popCb
-                case cb of
-                     Just f -> f Nothing
-                     Nothing -> return () -- This should not happen, spurious OK
-            handleMessage (NatsSvrError txt) = do
-                cb <- modifyMVar (natsRuntime nats) $ popCb
-                case cb of
-                     Just f -> f $ Just txt
-                     Nothing -> putStrLn $ show txt
-            handleMessage (NatsSvrInfo _) = return ()
-            handleMessage (NatsSvrMsg {..}) = do
-                msubscription <- Map.lookup msgSid <$> readIORef (natsSubMap nats)
-                case msubscription of
-                     Just subscription -> 
-                        (subCallback subscription) msgSid msgSubject (BL.fromChunks [msgText]) msgReply
-                        `catch`
-                            (\(e :: SomeException) -> putStrLn $ (show e))
-                     -- SID not found in map, force unsubscribe
-                     Nothing -> sendMessage nats True (NatsClntUnsubscribe msgSid) Nothing 
-                     
-            -- Sends ping if needed, aborts if we did not get PONG in time
-            checkPingTask = do
-                now <- getCurrentTime
-                (lastPing, pings, pongs) <- readIORef pingStatus
-                if (now `diffUTCTime` lastPing) > 1
-                    then do
-                        if pings /= pongs 
-                           then throwIO (NatsException "Ping timeouted") 
-                           else return ()
-                        sendMessage nats True NatsClntPing Nothing
-                        writeIORef pingStatus (now, pings +1, pongs)
-                    else return ()
-        in do
-            -- Ping code must be synchronously here because of exception handling
-            _ <- runMaybeT $ do
-                line <- MaybeT $ timeout pingInterval $ BS.hGetLine handle
-                decoded <- MaybeT $ return $ decodeMessage line
-                lift $ case decoded of
-                    (msg, Nothing) -> 
-                        handleMessage msg
-                    (msg@(NatsSvrMsg {}), Just paylen) -> do
-                        payload <- BS.hGet handle (paylen + 2) -- +2 = CRLF
-                        handleMessage msg{msgText=BS.take paylen payload}
-                    _ -> 
-                        putStrLn $ "Incorrect message: " ++ (show line)
-            checkPingTask
+    _ <- concurrently
+            (pingerThread nats pingStatus)
+            (connectionHandler' handle nats pingStatus)
+    return ()
+
+connectionHandler' :: Handle -> Nats -> IORef (Int, Int) -> IO ()
+connectionHandler' handle nats pingStatus = forever $ do
+    line <- BS.hGetLine handle
+    case decodeMessage line of
+        Just (msg, Nothing) -> 
+            handleMessage msg
+        Just (msg@(NatsSvrMsg {}), Just paylen) -> do
+            payload <- BS.hGet handle (paylen + 2) -- +2 = CRLF
+            handleMessage msg{msgText=BS.take paylen payload}
+        _ -> 
+            putStrLn $ "Incorrect message: " ++ (show line)
+            
+    where
+        -- | Pull callback for OK/ERR status from FIFO queue
+        popCb (h, queue, x1, x2) = return ((h, newq, x1, x2), item)
+            where
+                (item, newq) = D.popFront queue
+        handleMessage NatsSvrPing = sendMessage nats True NatsClntPong Nothing
+        handleMessage NatsSvrPong = 
+            atomicModifyIORef' pingStatus $ 
+                \(pings, pongs) -> ((pings, pongs + 1), ())
+            
+        handleMessage NatsSvrOK = do
+            cb <- modifyMVar (natsRuntime nats) $ popCb
+            case cb of
+                Just f -> f Nothing
+                Nothing -> return () -- This should not happen, spurious OK
+        handleMessage (NatsSvrError txt) = do
+            cb <- modifyMVar (natsRuntime nats) $ popCb
+            case cb of
+                Just f -> f $ Just txt
+                Nothing -> putStrLn $ show txt
+        handleMessage (NatsSvrInfo _) = return ()
+        handleMessage (NatsSvrMsg {..}) = do
+            msubscription <- Map.lookup msgSid <$> readIORef (natsSubMap nats)
+            case msubscription of
+                Just subscription -> 
+                    (subCallback subscription) msgSid msgSubject (BL.fromChunks [msgText]) msgReply
+                    `catch`
+                        (\(e :: SomeException) -> putStrLn $ (show e))
+                -- SID not found in map, force unsubscribe
+                Nothing -> sendMessage nats True (NatsClntUnsubscribe msgSid) Nothing 
                         
 -- | Connect to a NATS server    
 connect :: String -- ^ URI with format: nats:\/\/user:password\@localhost:4222

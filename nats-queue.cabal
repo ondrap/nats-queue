@@ -14,8 +14,7 @@ author:              Ondrej Palkovsky
 maintainer:          palkovsky.ondrej@gmail.com
 category:            Network
 build-type:          Simple
-cabal-version:       >=1.8
-
+cabal-version:       >=1.10
 
 source-repository head
   type:     git
@@ -23,15 +22,34 @@ source-repository head
 
 library
   exposed-modules:   Network.Nats, Network.Nats.Json
-  build-depends:     base==4.*, network>=2.6, dequeue, random, network-uri>=2.6,
-                     containers >= 0.5, bytestring, text, aeson >= 0.7,
-                     time, transformers
+  build-depends:     base == 4.*
+                   , network >=2.6
+                   , dequeue
+                   , random
+                   , network-uri >= 2.6
+                   , containers  >= 0.5
+                   , bytestring
+                   , text
+                   , aeson >= 0.7
+                   , async
+                   
   ghc-options:       -Wall
-  extensions:        TemplateHaskell
-                     OverloadedStrings
-                     RecordWildCards
-                     GeneralizedNewtypeDeriving
-                     PatternGuards
-                     DeriveDataTypeable
-                     Rank2Types
-                     ScopedTypeVariables
+  
+  default-language:  Haskell2010
+
+test-suite spec
+  main-is:         Spec.hs
+  type:            exitcode-stdio-1.0
+  hs-source-dirs:  test
+  default-language:  Haskell2010
+
+  build-depends:     base
+                   , hspec
+                   , network
+                   , dequeue
+                   , random
+                   , network-uri
+                   , containers
+                   , bytestring
+                   , text
+                   , aeson
