@@ -605,22 +605,19 @@ subscribe nats subject queue cb =
         squeue = makeSubject `fmap` queue
         addToSubTable sid = atomicModifyIORef' (natsSubMap nats) $ \submap ->
                 (Map.insert sid (NatsSubscription{subSubject=ssubject, subQueue=squeue, subCallback=cb, subSid=sid}) submap, ()) 
-        removeFromSubTable sid = atomicModifyIORef' (natsSubMap nats) $ \submap ->
-                (Map.delete sid submap, ()) 
     in do
         mvar <- newEmptyMVar :: IO (MVar (Maybe T.Text))
         sid <- newNatsSid nats
-        bracketOnError
-            (addToSubTable sid)
-            (const $ removeFromSubTable sid)
-            (\_ -> do
-                sendMessage nats True (NatsClntSubscribe ssubject sid squeue) 
-                    $ Just (putMVar mvar) -- Just put a result of operation to mvar
-                merr <- takeMVar mvar
-                case merr of
-                    Just err -> throwIO $ NatsException $ T.unpack err
-                    Nothing -> return $ sid
-            )
+        sendMessage nats True (NatsClntSubscribe ssubject sid squeue) $ Just $ \err -> do
+            case err of
+                Nothing -> addToSubTable sid
+                Just _ -> return ()
+            putMVar mvar err
+
+        merr <- takeMVar mvar
+        case merr of
+            Just err -> throwIO $ NatsException $ T.unpack err
+            Nothing -> return $ sid
 
 -- | Unsubscribe from a channel
 unsubscribe :: Nats 
