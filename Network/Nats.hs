@@ -205,9 +205,10 @@ data NatsHost = NatsHost {
 -- | Advanced settings for connecting to NATS server
 data NatsSettings = NatsSettings {
         natsHosts :: [NatsHost]
-      , natsOnConnect :: Nats -> (String, Int) -> IO ()  
-        -- ^ Called when a client has successfully connected. This callback is called synchronously
-        --   before the processing of incoming messages begins.
+      , natsOnReconnect :: Nats -> (String, Int) -> IO ()  
+        -- ^ Called when a client has successfully re-connected. This callback is called synchronously
+        --   before the processing of incoming messages begins. It is not called when the client
+        --   connects the first time, as such connection is synchronous.
       , natsOnDisconnect :: Nats -> String -> IO () 
         -- ^ Called when a client is disconnected.
     }
@@ -215,7 +216,7 @@ data NatsSettings = NatsSettings {
 defaultSettings :: NatsSettings
 defaultSettings = (NatsSettings {
         natsHosts = [(NatsHost "localhost" 4222 "nats" "nats")]
-      , natsOnConnect = \_ _ -> (return ())
+      , natsOnReconnect = \_ _ -> (return ())
       , natsOnDisconnect = \_ _ -> (return ())
     })
     
@@ -425,19 +426,20 @@ prepareConnection nats nhost = timeoutThrow timeoutInterval $
         )
 
 -- | Main thread that reads events from NATS server and reconnects if necessary
-connectionThread :: Nats
+connectionThread :: Bool 
+                    -> Nats
                     -> [NatsHost] -- ^ inifinite list of connections to try
                     -> IO ()
-connectionThread _ [] = error "Empty list of connections"
-connectionThread nats (thisconn:nextconn) = do
+connectionThread _ _ [] = error "Empty list of connections"
+connectionThread firstTime nats (thisconn:nextconn) = do
     mnewconnlist <- 
-        (connectionHandler nats thisconn >> return Nothing) -- connectionHandler never returns...
+        (connectionHandler firstTime nats thisconn >> return Nothing) -- connectionHandler never returns...
             `catches` [Handler (\(e :: IOException) -> Just <$> errorHandler e),
                        Handler (\(e :: NatsException) -> Just <$> errorHandler e),
                        Handler (\e -> finalHandler e >> return Nothing)]
     case mnewconnlist of
          Nothing -> return () -- Never happens
-         Just newconnlist -> connectionThread nats newconnlist
+         Just newconnlist -> connectionThread False nats newconnlist
     where
         finalize :: (Show e) => e -> IO ()
         finalize e = do
@@ -482,8 +484,8 @@ pingerThread nats pingStatus = forever $ do
     sendMessage nats True NatsClntPing Nothing
         
 -- | Forever read input from a connection and process it
-connectionHandler :: Nats -> NatsHost -> IO ()
-connectionHandler nats (NatsHost host port _ _) = do
+connectionHandler :: Bool -> Nats -> NatsHost -> IO ()
+connectionHandler firstTime nats (NatsHost host port _ _) = do
     (handle, _, _, _) <- readMVar (natsRuntime nats)
     -- Subscribe channels that are supposed to be subscribed
     subscriptions <- readIORef (natsSubMap nats)
@@ -491,7 +493,8 @@ connectionHandler nats (NatsHost host port _ _) = do
         sendMessage nats True (NatsClntSubscribe subject sid queue) Nothing
         
     -- Call user function that we are successfully connected
-    (natsOnConnect $ natsSettings nats) nats (host, port)
+    if firstTime then return ()
+                 else (natsOnReconnect $ natsSettings nats) nats (host, port)
     -- Allocate structures for PING, IORef is probably easiest to manage
     pingStatus <- newIORef (0, 0)
     
@@ -585,7 +588,7 @@ connectSettings settings = do
     
     -- Try to connect to all until one succeeds
     connhost <- tryUntilSuccess hosts $ prepareConnection nats
-    threadid <- forkIO $ connectionThread nats (connhost:(cycle hosts))
+    threadid <- forkIO $ connectionThread True nats (connhost:(cycle hosts))
     putMVar mthreadid threadid
     return nats
     where
