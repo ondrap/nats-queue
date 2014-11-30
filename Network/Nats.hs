@@ -85,7 +85,7 @@ import Control.Concurrent.MVar
 import Control.Concurrent
 import qualified Network.Socket as S
 import Network.Socket (SocketOption(KeepAlive, NoDelay), setSocketOption, getAddrInfo, SockAddr(..))
-import Control.Monad (forever, replicateM)
+import Control.Monad (forever, replicateM, void)
 import Data.Dequeue as D
 import Control.Applicative ((<$>))
 import Data.Typeable
@@ -499,10 +499,9 @@ connectionHandler firstTime nats (NatsHost host port _ _) = do
     pingStatus <- newIORef (0, 0)
     
     -- Perform the job
-    _ <- concurrently
+    void $ concurrently
             (pingerThread nats pingStatus)
             (connectionHandler' handle nats pingStatus)
-    return ()
 
 connectionHandler' :: Handle -> Nats -> IORef (Int, Int) -> IO ()
 connectionHandler' handle nats pingStatus = forever $ do
@@ -645,8 +644,7 @@ request nats subject body = do
     inbox <- newInbox
     bracket
             (subscribe nats inbox Nothing $ \_ _ response _ -> do
-                _ <- tryPutMVar mvar (Right response)
-                return ()
+                void $ tryPutMVar mvar (Right response)
             ) 
             (unsubscribe nats)
             (\_ -> do
