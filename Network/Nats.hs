@@ -1,4 +1,10 @@
-{-# LANGUAGE TemplateHaskell,OverloadedStrings,RecordWildCards,GeneralizedNewtypeDeriving,PatternGuards,DeriveDataTypeable, ScopedTypeVariables #-}
+{-# LANGUAGE DeriveDataTypeable         #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE PatternGuards              #-}
+{-# LANGUAGE RecordWildCards            #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE TemplateHaskell            #-}
 
 module Network.Nats (
     -- * How to use this module
@@ -80,35 +86,41 @@ module Network.Nats (
 ) where
 
 
-import System.IO
-import Control.Concurrent.MVar
-import Control.Concurrent
-import qualified Network.Socket as S
-import Network.Socket (SocketOption(KeepAlive, NoDelay), setSocketOption, getAddrInfo, SockAddr(..))
-import Control.Monad (forever, replicateM, void, unless, when)
-import Data.Dequeue as D
-import Control.Applicative ((<$>))
-import Data.Typeable
-import Data.Maybe (fromMaybe)
-import qualified Data.Foldable as FOLD
-import Control.Exception (bracket, bracketOnError, throwIO, catch, IOException, AsyncException, Exception, SomeException,
-                          catches, Handler(..))
-import System.Random (randomRIO)
-import Data.IORef
-import System.Timeout
-import Control.Concurrent.Async (concurrently)
+import           Control.Applicative        ((<$>))
+import           Control.Concurrent
+import           Control.Concurrent.Async   (concurrently)
+import           Control.Exception          (AsyncException, Exception,
+                                             Handler (..), IOException,
+                                             SomeException, bracket,
+                                             bracketOnError, catch, catches,
+                                             throwIO)
+import           Control.Monad              (forever, replicateM, unless, void,
+                                             when)
+import           Data.Dequeue               as D
+import qualified Data.Foldable              as FOLD
+import           Data.IORef
+import           Data.Maybe                 (fromMaybe)
+import           Data.Typeable
+import           Network.Socket             (SockAddr (..),
+                                             SocketOption (KeepAlive, NoDelay),
+                                             getAddrInfo, setSocketOption)
+import qualified Network.Socket             as S
+import           System.IO
+import           System.Random              (randomRIO)
+import           System.Timeout
 
-import qualified Data.Map.Strict as Map
+import qualified Data.ByteString.Char8      as BS
 import qualified Data.ByteString.Lazy.Char8 as BL
-import qualified Data.ByteString.Char8 as BS
-import Data.Char (toLower, isUpper)
-import qualified Data.Text as T
-import Data.Text.Encoding (decodeUtf8)
+import           Data.Char                  (isUpper, toLower)
+import qualified Data.Map.Strict            as Map
+import qualified Data.Text                  as T
+import           Data.Text.Encoding         (decodeUtf8)
 
-import qualified Data.Aeson as AE
-import Data.Aeson.TH (deriveJSON, defaultOptions, fieldLabelModifier)
+import qualified Data.Aeson                 as AE
+import           Data.Aeson.TH              (defaultOptions, deriveJSON,
+                                             fieldLabelModifier)
 
-import qualified Network.URI as URI
+import qualified Network.URI                as URI
 
 -- | How often should we ping the server
 pingInterval :: Int
@@ -124,10 +136,10 @@ data NatsException = NatsException String
 instance Exception NatsException
 
 data NatsConnectionOptions = NatsConnectionOptions {
-        natsConnUser :: String
-        , natsConnPass :: String
-        , natsConnVerbose :: Bool
-        , natsConnPedantic :: Bool
+        natsConnUser          :: String
+        , natsConnPass        :: String
+        , natsConnVerbose     :: Bool
+        , natsConnPedantic    :: Bool
         , natsConnSslRequired :: Bool
     } deriving (Show)
 
@@ -174,10 +186,10 @@ type MsgCallback = NatsSID -- ^ SID of subscription
         -> IO ()
 
 data NatsSubscription = NatsSubscription {
-        subSubject :: Subject
-      , subQueue :: Maybe Subject
+        subSubject  :: Subject
+      , subQueue    :: Maybe Subject
       , subCallback :: MsgCallback
-      , subSid :: NatsSID
+      , subSid      :: NatsSID
     }
 
 type FifoQueue = D.BankersDequeue (Maybe T.Text -> IO ())
@@ -205,8 +217,8 @@ data NatsHost = NatsHost {
 
 -- | Advanced settings for connecting to NATS server
 data NatsSettings = NatsSettings {
-        natsHosts :: [NatsHost]
-      , natsOnReconnect :: Nats -> (String, Int) -> IO ()
+        natsHosts        :: [NatsHost]
+      , natsOnReconnect  :: Nats -> (String, Int) -> IO ()
         -- ^ Called when a client has successfully re-connected. This callback is called synchronously
         --   before the processing of incoming messages begins. It is not called when the client
         --   connects the first time, as such connection is synchronous.

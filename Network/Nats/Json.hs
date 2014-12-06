@@ -1,4 +1,5 @@
-{-# LANGUAGE PatternGuards,Rank2Types #-}
+{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE Rank2Types    #-}
 
 
 module Network.Nats.Json (
@@ -7,11 +8,11 @@ module Network.Nats.Json (
   , requestMany
 ) where
 
-import Network.Nats (Nats, NatsSID)
-import qualified Network.Nats as N
-import qualified Data.Aeson as AE
-import Data.Maybe (mapMaybe)
-import Control.Applicative ((<$>))
+import           Control.Applicative ((<$>))
+import qualified Data.Aeson          as AE
+import           Data.Maybe          (mapMaybe)
+import           Network.Nats        (Nats, NatsSID)
+import qualified Network.Nats        as N
 
 -- | Publish a message
 publish :: AE.ToJSON a =>
