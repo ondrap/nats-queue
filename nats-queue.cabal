@@ -30,7 +30,7 @@ library
                    , containers  >= 0.5
                    , bytestring
                    , text
-                   , aeson >= 0.7
+                   , aeson == 0.7.*
                    , async
                    
   ghc-options:       -Wall

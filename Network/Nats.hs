@@ -16,13 +16,13 @@ module Network.Nats (
     -- 'publish' nats \"news\" \"I got news for you\"
     --
     -- 'unsubscribe' nats sid
-    -- 
+    --
     -- 'subscribe' nats \"gift\" Nothing $ \\_ _ msg mreply -> do
     --     putStrLn $ show msg
     --     case mreply of
     --        Nothing -> return ()
     --        Just reply -> 'publish' nats reply \"I've got a gift for you.\"
-    --  
+    --
     -- reply <- 'request' nats \"gift\" \"Do you have anything for me?\"
     --
     -- putStrLn $ show reply
@@ -33,15 +33,15 @@ module Network.Nats (
     -- Client commands are generally acknowledged by the server with an +OK message,
     -- the library waits for acknowledgment only for the 'subscribe' command. The NATS
     -- server usually closes the connection when there is an error.
-    
+
     -- * Comparison to API in other languages
     -- |Compared to API in other languages, the Haskell binding does
     -- not implement timeouts and automatic unsubscribing, the 'request' call is implemented
-    -- as a synchronous call. 
+    -- as a synchronous call.
     --
     -- The timeouts can be easily implemented using 'System.Timeout' module, automatic unsubscribing
     -- can be done in the callback function.
-    
+
     -- * Error behaviour
     -- |The 'connect' function tries to connect to the NATS server. In case of failure it immediately fails.
     -- If there is an error during operations, the NATS module tries to reconnect to the server.
@@ -53,10 +53,10 @@ module Network.Nats (
     -- system without guarantees, 'publish' is not guaranteed to succeed anyway).
     -- After reconnecting to the server, the module automatically resubscribes to previously subscribed channels.
     --
-    -- If there is a network failure, the nats commands 'subscribe' and 'request' 
+    -- If there is a network failure, the nats commands 'subscribe' and 'request'
     -- may fail on an IOexception or NatsException. The 'subscribe'
     -- command is synchronous, it waits until the server responds with +OK. The commands 'publish'
-    -- and 'unsubscribe' are asynchronous, no confirmation from server is required and they 
+    -- and 'unsubscribe' are asynchronous, no confirmation from server is required and they
     -- should not raise an exception.
     --
     Nats
@@ -85,10 +85,11 @@ import Control.Concurrent.MVar
 import Control.Concurrent
 import qualified Network.Socket as S
 import Network.Socket (SocketOption(KeepAlive, NoDelay), setSocketOption, getAddrInfo, SockAddr(..))
-import Control.Monad (forever, replicateM, void)
+import Control.Monad (forever, replicateM, void, unless, when)
 import Data.Dequeue as D
 import Control.Applicative ((<$>))
 import Data.Typeable
+import Data.Maybe (fromMaybe)
 import qualified Data.Foldable as FOLD
 import Control.Exception (bracket, bracketOnError, throwIO, catch, IOException, AsyncException, Exception, SomeException,
                           catches, Handler(..))
@@ -133,15 +134,15 @@ data NatsConnectionOptions = NatsConnectionOptions {
 defaultConnectionOptions :: NatsConnectionOptions
 defaultConnectionOptions = NatsConnectionOptions{natsConnUser="nats",natsConnPass="nats", natsConnVerbose=True,
                                                 natsConnPedantic=True, natsConnSslRequired=False}
-    
-$(deriveJSON defaultOptions{fieldLabelModifier =(
+
+$(deriveJSON defaultOptions{fieldLabelModifier =
             let insertUnderscore acc chr
                     | isUpper chr = chr : '_' : acc
                     | otherwise   = chr : acc
-            in 
+            in
                 map toLower . drop 1 . reverse . foldl insertUnderscore [] . drop 8
-        )} ''NatsConnectionOptions)
-    
+        } ''NatsConnectionOptions)
+
 -- | Server information sent usually upon opening a connection to NATS server
 data NatsServerInfo = NatsServerInfo {
 --     natsSvrServerId :: T.Text
@@ -149,14 +150,14 @@ data NatsServerInfo = NatsServerInfo {
 --     , natsSvrMaxPayload :: Int
       natsSvrAuthRequired :: Bool
     } deriving (Show)
-    
-$(deriveJSON defaultOptions{fieldLabelModifier =(
+
+$(deriveJSON defaultOptions{fieldLabelModifier =
             let insertUnderscore acc chr
                     | isUpper chr = chr : '_' : acc
                     | otherwise   = chr : acc
-            in 
+            in
                 map toLower . drop 1 . reverse . foldl insertUnderscore [] . drop 7
-        )} ''NatsServerInfo)
+        } ''NatsServerInfo)
 
 
 newtype NatsSID = NatsSID Int deriving (Num, Ord, Eq)
@@ -171,16 +172,16 @@ type MsgCallback = NatsSID -- ^ SID of subscription
         -> BL.ByteString -- ^ Message
         -> Maybe String -- ^ Reply subject
         -> IO ()
-    
+
 data NatsSubscription = NatsSubscription {
         subSubject :: Subject
       , subQueue :: Maybe Subject
       , subCallback :: MsgCallback
       , subSid :: NatsSID
     }
-    
+
 type FifoQueue = D.BankersDequeue (Maybe T.Text -> IO ())
-    
+
 -- | Control structure representing a connection to NATS server
 data Nats = Nats {
           natsSettings :: NatsSettings
@@ -201,25 +202,25 @@ data NatsHost = NatsHost {
       , natsHUser :: String      -- ^ Username for authentication
       , natsHPass :: String  -- ^ Password for authentication
     }
-    
+
 -- | Advanced settings for connecting to NATS server
 data NatsSettings = NatsSettings {
         natsHosts :: [NatsHost]
-      , natsOnReconnect :: Nats -> (String, Int) -> IO ()  
+      , natsOnReconnect :: Nats -> (String, Int) -> IO ()
         -- ^ Called when a client has successfully re-connected. This callback is called synchronously
         --   before the processing of incoming messages begins. It is not called when the client
         --   connects the first time, as such connection is synchronous.
-      , natsOnDisconnect :: Nats -> String -> IO () 
+      , natsOnDisconnect :: Nats -> String -> IO ()
         -- ^ Called when a client is disconnected.
     }
 
 defaultSettings :: NatsSettings
-defaultSettings = (NatsSettings {
-        natsHosts = [(NatsHost "localhost" 4222 "nats" "nats")]
+defaultSettings = NatsSettings {
+        natsHosts = [NatsHost "localhost" 4222 "nats" "nats"]
       , natsOnReconnect = \_ _ -> (return ())
       , natsOnDisconnect = \_ _ -> (return ())
-    })
-    
+    }
+
 -- | Message received by the client from the server
 data NatsSvrMessage =
     NatsSvrMsg { msgSubject::String, msgSid::NatsSID, msgText::BS.ByteString, msgReply::Maybe String}
@@ -228,8 +229,8 @@ data NatsSvrMessage =
     | NatsSvrPing
     | NatsSvrPong
     | NatsSvrInfo NatsServerInfo
-    deriving (Show)    
-    
+    deriving (Show)
+
 newtype Subject = Subject String deriving (Show)
 
 subjectToStr :: Subject -> String
@@ -240,7 +241,7 @@ makeSubject ""        = error "Empty subject"
 makeSubject str
     | any (<=' ') str = error $ "Subject contains incorrect characters: " ++ str
     | otherwise       = Subject str
-    
+
 -- | Message sent from the client to server
 data NatsClntMessage =
     NatsClntPing
@@ -249,7 +250,7 @@ data NatsClntMessage =
     | NatsClntUnsubscribe NatsSID
     | NatsClntPublish Subject (Maybe Subject) BL.ByteString
     | NatsClntConnect NatsConnectionOptions
-    
+
 -- | Encode NATS client message
 makeClntMsg :: NatsClntMessage -> BL.ByteString
 makeClntMsg = BL.fromChunks . _makeClntMsg
@@ -257,19 +258,19 @@ makeClntMsg = BL.fromChunks . _makeClntMsg
         _makeClntMsg :: NatsClntMessage -> [BS.ByteString]
         _makeClntMsg NatsClntPing = ["PING"]
         _makeClntMsg NatsClntPong = ["PONG"]
-        _makeClntMsg (NatsClntSubscribe subject sid (Just queue)) = [BS.pack $ "SUB " ++ (subjectToStr subject) ++ " " ++ (subjectToStr queue) ++ " " ++ (show sid)]
-        _makeClntMsg (NatsClntSubscribe subject sid Nothing) = [BS.pack $ "SUB " ++ (subjectToStr subject) ++ " " ++ (show sid)]
-        _makeClntMsg (NatsClntUnsubscribe sid) = [ BS.pack $ "UNSUB " ++ (show sid) ]
-        _makeClntMsg (NatsClntPublish subj Nothing msg) = 
-            (BS.pack $ "PUB " ++ (subjectToStr subj) ++ " " ++ (show $ BL.length msg) ++ "\r\n") : BL.toChunks msg
-        _makeClntMsg (NatsClntPublish subj (Just reply) msg) = 
-            (BS.pack $ "PUB " ++ (subjectToStr subj) ++ " " ++ (subjectToStr reply) ++ " " ++ (show $ BL.length msg) ++ "\r\n") : BL.toChunks msg
-        _makeClntMsg (NatsClntConnect info) = "CONNECT " : (BL.toChunks $ AE.encode info)
-    
+        _makeClntMsg (NatsClntSubscribe subject sid (Just queue)) = [BS.pack $ "SUB " ++ subjectToStr subject ++ " " ++ subjectToStr queue ++ " " ++ show sid]
+        _makeClntMsg (NatsClntSubscribe subject sid Nothing) = [BS.pack $ "SUB " ++ subjectToStr subject ++ " " ++ show sid]
+        _makeClntMsg (NatsClntUnsubscribe sid) = [ BS.pack $ "UNSUB " ++ show sid ]
+        _makeClntMsg (NatsClntPublish subj Nothing msg) =
+            BS.pack ("PUB " ++ subjectToStr subj ++ " " ++ show (BL.length msg) ++ "\r\n") : BL.toChunks msg
+        _makeClntMsg (NatsClntPublish subj (Just reply) msg) =
+            BS.pack ("PUB " ++ subjectToStr subj ++ " " ++ subjectToStr reply ++ " " ++ show (BL.length msg) ++ "\r\n") : BL.toChunks msg
+        _makeClntMsg (NatsClntConnect info) = "CONNECT " : BL.toChunks (AE.encode info)
+
 -- | Decode NATS server message; result is message + payload (payload is 'undefined' in NatsSvrMsg)
 decodeMessage :: BS.ByteString -> Maybe (NatsSvrMessage, Maybe Int)
 decodeMessage line = decodeMessage_ mid (BS.drop 1 mrest)
-    where 
+    where
         (mid, mrest) = BS.span (\x -> x/=' ' && x/='\r') line
         decodeMessage_ :: BS.ByteString -> BS.ByteString -> Maybe (NatsSvrMessage, Maybe Int)
         decodeMessage_ "PING" _ = Just (NatsSvrPing, Nothing)
@@ -278,15 +279,15 @@ decodeMessage line = decodeMessage_ mid (BS.drop 1 mrest)
         decodeMessage_ "-ERR" msg = Just (NatsSvrError (decodeUtf8 msg), Nothing)
         decodeMessage_ "INFO" msg = do
             info <- AE.decode $ BL.fromChunks [msg]
-            return $ (NatsSvrInfo info, Nothing)
-        decodeMessage_ "MSG" msg = do
-            case (map BS.unpack (BS.words msg)) of
+            return (NatsSvrInfo info, Nothing)
+        decodeMessage_ "MSG" msg =
+            case map BS.unpack (BS.words msg) of
                  [subj, sid, len] -> return (NatsSvrMsg subj (read sid) undefined Nothing, Just $ read len)
-                 [subj, sid, reply, len] -> return (NatsSvrMsg subj (read sid) undefined (Just $ reply), Just $ read len)
+                 [subj, sid, reply, len] -> return (NatsSvrMsg subj (read sid) undefined (Just reply), Just $ read len)
                  _ -> fail ""
         decodeMessage_ _ _ = Nothing
 
-    
+
 -- | Returns next sid and updates MVar
 newNatsSid :: Nats -> IO NatsSID
 newNatsSid nats = atomicModifyIORef' (natsNextSid nats) $ \sid -> (sid + 1, sid)
@@ -296,21 +297,21 @@ newInbox :: IO String
 newInbox = do
     rnd <- replicateM 13 (randomRIO ('a', 'z'))
     return $ "_INBOX." ++ rnd
-    
+
 -- | Create a TCP connection to the server
 connectToServer :: String -> Int -> IO Handle
 connectToServer hostname port = do
     addrinfos <- getAddrInfo Nothing (Just hostname) Nothing
-    let serveraddr = (head addrinfos)
+    let serveraddr = head addrinfos
     -- Create a socket
     bracketOnError
         (S.socket (S.addrFamily serveraddr) S.Stream S.defaultProtocol)
-        (S.sClose)
+        S.sClose
         (\sock -> do
-            
+
             setSocketOption sock KeepAlive 1
             setSocketOption sock NoDelay 1
-            let connaddr = case (S.addrAddress serveraddr) of
+            let connaddr = case S.addrAddress serveraddr of
                     SockAddrInet _ haddr -> SockAddrInet (fromInteger $ toInteger port) haddr
                     SockAddrInet6 _ finfo haddr scopeid -> SockAddrInet6 (fromInteger $ toInteger port) finfo haddr scopeid
                     other -> other
@@ -319,24 +320,24 @@ connectToServer hostname port = do
             hSetBuffering h NoBuffering
             return h
         )
-        
-        
-ensureConnection :: Nats 
+
+
+ensureConnection :: Nats
     -> Bool -- ^ If true, wait for the connection to become available
     -> ((Handle, FifoQueue) -> IO FifoQueue) -- ^ Action to do when the connection is available
     -> IO ()
 -- Block if we are disconnected
-ensureConnection nats True f = do
+ensureConnection nats True f =
     bracketOnError
         (takeMVar $ natsRuntime nats)
         (putMVar $ natsRuntime nats)
         (\r@(handle, _, x1, x2) -> do
             result <- runAction r
-            case result of 
+            case result of
                  Just nqueue -> putMVar (natsRuntime nats) (handle, nqueue, x1, x2)
                  Nothing -> return ()
         )
-    where 
+    where
         -- Connected
         runAction (handle, queue, True, _) = do
             nqueue <- f (handle, queue)
@@ -357,17 +358,17 @@ ensureConnection nats False f = modifyMVarMasked_ (natsRuntime nats) runAction
         -- Disconnected, ignore
         runAction (handle, queue, False, csig) =
             return (handle, queue, False, csig)
-        
+
 -- | Send a message and register callback if possible
 sendMessage :: Nats -> Bool -> NatsClntMessage -> Maybe (Maybe T.Text -> IO ()) -> IO ()
 sendMessage nats blockIfDisconnected msg mcb
-    | Just cb <- mcb, supportsCallback msg = 
+    | Just cb <- mcb, supportsCallback msg =
         ensureConnection nats blockIfDisconnected $ \(handle, queue) -> do
             _sendMessage handle msg
             return $ D.pushBack queue cb -- Append callback on the callback queue
     | supportsCallback msg = sendMessage nats blockIfDisconnected msg (Just $ \_ -> return ())
     | Just _ <- mcb, not (supportsCallback msg) = error "Callback not supported"
-    | True = ensureConnection nats blockIfDisconnected $ \(handle, queue) -> do
+    | otherwise = ensureConnection nats blockIfDisconnected $ \(handle, queue) -> do
         _sendMessage handle msg
         return queue
     where
@@ -384,14 +385,14 @@ timeoutThrow t f = do
     case res of
          Just x -> return x
          Nothing -> throwIO $ NatsException "Reached timeout"
-        
+
 _sendMessage :: Handle -> NatsClntMessage -> IO ()
 _sendMessage handle cmsg = timeoutThrow timeoutInterval $ do
     let msg = makeClntMsg cmsg
     case () of
        _| BL.length msg < 1024 ->
-                BS.hPut handle $ BS.concat $ (BL.toChunks msg) ++ ["\r\n"]
-        | True -> do
+                BS.hPut handle $ BS.concat $ BL.toChunks msg ++ ["\r\n"]
+        | otherwise -> do
                 BL.hPut handle msg
                 BS.hPut handle "\r\n"
 
@@ -399,40 +400,40 @@ _sendMessage handle cmsg = timeoutThrow timeoutInterval $ do
 authenticate :: Handle -> String -> String -> IO ()
 authenticate handle user password = do
     info <- BS.hGetLine handle
-    case (decodeMessage info) of
+    case decodeMessage info of
         Just (NatsSvrInfo (NatsServerInfo {natsSvrAuthRequired=True}), Nothing) -> do
             let coptions = defaultConnectionOptions{natsConnUser=user, natsConnPass=password}
             BL.hPut handle $ makeClntMsg (NatsClntConnect coptions)
             BS.hPut handle "\r\n"
             response <- BS.hGetLine handle
-            case (decodeMessage response) of
+            case decodeMessage response of
                  Just (NatsSvrOK, Nothing) -> return ()
-                 Just (NatsSvrError err, Nothing)-> throwIO $ NatsException $ "Authentication error: " ++ (show err)
-                 _ -> throwIO $ NatsException $ "Incorrect server response"
+                 Just (NatsSvrError err, Nothing)-> throwIO $ NatsException $ "Authentication error: " ++ show err
+                 _ -> throwIO $ NatsException "Incorrect server response"
         Just (NatsSvrInfo _, Nothing) -> return ()
         _ -> throwIO $ NatsException "Incorrect input from server"
-            
+
 -- | Open and authenticate a connection
 prepareConnection :: Nats -> NatsHost -> IO ()
 prepareConnection nats nhost = timeoutThrow timeoutInterval $
     bracketOnError
         (connectToServer (natsHHost nhost) (natsHPort nhost))
-        (hClose)
+        hClose
         (\handle -> do
             authenticate handle (natsHUser nhost) (natsHPass nhost)
             csig <- modifyMVar (natsRuntime nats) $ \(_,_,_, csig) ->
-                return $ ((handle, D.empty, True, undefined), csig)
+                return ((handle, D.empty, True, undefined), csig)
             putMVar csig ()
         )
 
 -- | Main thread that reads events from NATS server and reconnects if necessary
-connectionThread :: Bool 
+connectionThread :: Bool
                     -> Nats
                     -> [NatsHost] -- ^ inifinite list of connections to try
                     -> IO ()
 connectionThread _ _ [] = error "Empty list of connections"
 connectionThread firstTime nats (thisconn:nextconn) = do
-    mnewconnlist <- 
+    mnewconnlist <-
         (connectionHandler firstTime nats thisconn >> return Nothing) -- connectionHandler never returns...
             `catches` [Handler (\(e :: IOException) -> Just <$> errorHandler e),
                        Handler (\(e :: NatsException) -> Just <$> errorHandler e),
@@ -453,36 +454,33 @@ connectionThread firstTime nats (thisconn:nextconn) = do
             FOLD.mapM_ (\f -> f $ Just (T.pack $ show e)) queue
             -- Call user supplied disconnect
             (natsOnDisconnect $ natsSettings nats) nats (show e)
-            
+
         errorHandler :: (Show e) => e -> IO [NatsHost]
         errorHandler e = do
             finalize e
             tryToConnect nextconn
             where
                 tryToConnect connlist@(conn:rest) = do
-                    res <- ((prepareConnection nats conn) >> (return $ Just connlist))
+                    res <- (prepareConnection nats conn >> return (Just connlist))
                         `catches` [ Handler (\(_ :: IOException) -> return Nothing),
                                     Handler (\(_ :: NatsException) -> return Nothing) ]
                     case res of
                          Just restlist -> return restlist
                          Nothing       -> threadDelay timeoutInterval >> tryToConnect rest
                 tryToConnect [] = error "Empty list of connections"
-                        
+
         -- Handler for exiting the thread
         finalHandler :: AsyncException -> IO ()
-        finalHandler e = do
-            finalize e
+        finalHandler = finalize
 
 pingerThread :: Nats -> IORef (Int, Int) -> IO ()
 pingerThread nats pingStatus = forever $ do
     threadDelay pingInterval
     -- todo - kontrola pingu
     ok <- atomicModifyIORef' pingStatus $ \(pings, pongs) -> ((pings+1, pongs), pings - pongs < 2)
-    if ok == False
-        then throwIO (NatsException "Ping timeouted") 
-        else return ()
+    unless  ok $ throwIO (NatsException "Ping timeouted")
     sendMessage nats True NatsClntPing Nothing
-        
+
 -- | Forever read input from a connection and process it
 connectionHandler :: Bool -> Nats -> NatsHost -> IO ()
 connectionHandler firstTime nats (NatsHost host port _ _) = do
@@ -491,13 +489,12 @@ connectionHandler firstTime nats (NatsHost host port _ _) = do
     subscriptions <- readIORef (natsSubMap nats)
     FOLD.forM_ subscriptions $ \(NatsSubscription subject queue _ sid) ->
         sendMessage nats True (NatsClntSubscribe subject sid queue) Nothing
-        
+
     -- Call user function that we are successfully connected
-    if firstTime then return ()
-                 else (natsOnReconnect $ natsSettings nats) nats (host, port)
+    unless firstTime $ (natsOnReconnect $ natsSettings nats) nats (host, port)
     -- Allocate structures for PING, IORef is probably easiest to manage
     pingStatus <- newIORef (0, 0)
-    
+
     -- Perform the job
     void $ concurrently
             (pingerThread nats pingStatus)
@@ -507,106 +504,103 @@ connectionHandler' :: Handle -> Nats -> IORef (Int, Int) -> IO ()
 connectionHandler' handle nats pingStatus = forever $ do
     line <- BS.hGetLine handle
     case decodeMessage line of
-        Just (msg, Nothing) -> 
+        Just (msg, Nothing) ->
             handleMessage msg
         Just (msg@(NatsSvrMsg {}), Just paylen) -> do
             payload <- BS.hGet handle (paylen + 2) -- +2 = CRLF
             handleMessage msg{msgText=BS.take paylen payload}
-        _ -> 
-            putStrLn $ "Incorrect message: " ++ (show line)
-            
+        _ ->
+            putStrLn $ "Incorrect message: " ++ show line
+
     where
         -- | Pull callback for OK/ERR status from FIFO queue
         popCb (h, queue, x1, x2) = return ((h, newq, x1, x2), item)
             where
                 (item, newq) = D.popFront queue
         handleMessage NatsSvrPing = sendMessage nats True NatsClntPong Nothing
-        handleMessage NatsSvrPong = 
-            atomicModifyIORef' pingStatus $ 
+        handleMessage NatsSvrPong =
+            atomicModifyIORef' pingStatus $
                 \(pings, pongs) -> ((pings, pongs + 1), ())
-            
+
         handleMessage NatsSvrOK = do
-            cb <- modifyMVar (natsRuntime nats) $ popCb
+            cb <- modifyMVar (natsRuntime nats) popCb
             case cb of
                 Just f -> f Nothing
                 Nothing -> return () -- This should not happen, spurious OK
         handleMessage (NatsSvrError txt) = do
-            cb <- modifyMVar (natsRuntime nats) $ popCb
+            cb <- modifyMVar (natsRuntime nats) popCb
             case cb of
                 Just f -> f $ Just txt
-                Nothing -> putStrLn $ show txt
+                Nothing -> print txt
         handleMessage (NatsSvrInfo _) = return ()
         handleMessage (NatsSvrMsg {..}) = do
             msubscription <- Map.lookup msgSid <$> readIORef (natsSubMap nats)
             case msubscription of
-                Just subscription -> 
-                    (subCallback subscription) msgSid msgSubject (BL.fromChunks [msgText]) msgReply
+                Just subscription ->
+                    subCallback subscription msgSid msgSubject (BL.fromChunks [msgText]) msgReply
                     `catch`
-                        (\(e :: SomeException) -> putStrLn $ (show e))
+                        (\(e :: SomeException) -> print e)
                 -- SID not found in map, force unsubscribe
-                Nothing -> sendMessage nats True (NatsClntUnsubscribe msgSid) Nothing 
-                        
--- | Connect to a NATS server    
+                Nothing -> sendMessage nats True (NatsClntUnsubscribe msgSid) Nothing
+
+-- | Connect to a NATS server
 connect :: String -- ^ URI with format: nats:\/\/user:password\@localhost:4222
     -> IO Nats
 connect uri = do
-    let parsedUri = case (URI.parseURI uri) of 
-            Just x -> x
-            Nothing -> error ("Error parsing NATS url: " ++ uri)
-    if URI.uriScheme parsedUri /= "nats:"
-        then error "Incorrect URL scheme"
-        else return ()
-    
-    let (host, port, user, password) = case (URI.uriAuthority parsedUri) of
-                Just (URI.URIAuth {..}) -> (uriRegName, 
+    let parsedUri = fromMaybe (error ("Error parsing NATS url: " ++ uri))
+                      (URI.parseURI uri)
+    when (URI.uriScheme parsedUri /= "nats:") $ error "Incorrect URL scheme"
+
+    let (host, port, user, password) = case URI.uriAuthority parsedUri of
+                Just (URI.URIAuth {..}) -> (uriRegName,
                                           read $ drop 1 uriPort,
-                                          takeWhile (\x -> x /= ':') uriUserInfo,
-                                          takeWhile (\x -> x /= '@') $ drop 1 $ dropWhile (\x -> x /= ':') uriUserInfo
+                                          takeWhile (/= ':') uriUserInfo,
+                                          takeWhile (/= '@') $ drop 1 $ dropWhile (/= ':') uriUserInfo
                                           )
                 Nothing -> error "Missing hostname section"
     connectSettings defaultSettings{
-            natsHosts=[(NatsHost host port user password)]
+            natsHosts=[NatsHost host port user password]
         }
 
 -- | Connect to NATS server using custom settings
-connectSettings :: NatsSettings -> IO Nats                
+connectSettings :: NatsSettings -> IO Nats
 connectSettings settings = do
     csig <- newEmptyMVar
     mruntime <- newMVar (undefined, undefined, False, csig)
-    mthreadid <- newEmptyMVar 
+    mthreadid <- newEmptyMVar
     nextsid <- newIORef 1
     submap <- newIORef Map.empty
     let nats = Nats{
               natsSettings=settings
-            , natsRuntime=mruntime 
-            , natsThreadId=mthreadid 
-            , natsNextSid=nextsid 
+            , natsRuntime=mruntime
+            , natsThreadId=mthreadid
+            , natsNextSid=nextsid
             , natsSubMap=submap
         }
-        hosts = (natsHosts settings)
-    
+        hosts = natsHosts settings
+
     -- Try to connect to all until one succeeds
     connhost <- tryUntilSuccess hosts $ prepareConnection nats
-    threadid <- forkIO $ connectionThread True nats (connhost:(cycle hosts))
+    threadid <- forkIO $ connectionThread True nats (connhost : cycle hosts)
     putMVar mthreadid threadid
     return nats
     where
         tryUntilSuccess [a] f = f a >> return a
         tryUntilSuccess (a:rest) f = (f a >> return a) `catch` (\(_ :: SomeException) -> tryUntilSuccess rest f)
         tryUntilSuccess [] _ = error "Empty list"
-    
--- | Subscribe to a channel, optionally specifying queue group 
-subscribe :: Nats 
+
+-- | Subscribe to a channel, optionally specifying queue group
+subscribe :: Nats
     -> String -- ^ Subject
-    -> (Maybe String) -- ^ Queue
+    -> Maybe String -- ^ Queue
     -> MsgCallback -- ^ Callback
     -> IO NatsSID -- ^ SID of subscription
-subscribe nats subject queue cb = 
+subscribe nats subject queue cb =
     let
         ssubject = makeSubject subject
         squeue = makeSubject `fmap` queue
         addToSubTable sid = atomicModifyIORef' (natsSubMap nats) $ \submap ->
-                (Map.insert sid (NatsSubscription{subSubject=ssubject, subQueue=squeue, subCallback=cb, subSid=sid}) submap, ()) 
+                (Map.insert sid NatsSubscription{subSubject=ssubject, subQueue=squeue, subCallback=cb, subSid=sid} submap, ())
     in do
         mvar <- newEmptyMVar :: IO (MVar (Maybe T.Text))
         sid <- newNatsSid nats
@@ -619,11 +613,11 @@ subscribe nats subject queue cb =
         merr <- takeMVar mvar
         case merr of
             Just err -> throwIO $ NatsException $ T.unpack err
-            Nothing -> return $ sid
+            Nothing -> return sid
 
 -- | Unsubscribe from a channel
-unsubscribe :: Nats 
-    -> NatsSID 
+unsubscribe :: Nats
+    -> NatsSID
     -> IO ()
 unsubscribe nats sid = do
     -- Remove from internal tables
@@ -632,10 +626,10 @@ unsubscribe nats sid = do
     sendMessage nats False (NatsClntUnsubscribe sid) Nothing
         `catches` [ Handler (\(_ :: IOException) -> return ()),
                     Handler (\(_ :: NatsException) -> return ()) ]
-            
+
 
 -- | Synchronous request/response communication to obtain one message
-request :: Nats 
+request :: Nats
     -> String             -- ^ Subject
     -> BL.ByteString      -- ^ Request
     -> IO BL.ByteString   -- ^ Response
@@ -643,19 +637,19 @@ request nats subject body = do
     mvar <- newEmptyMVar :: IO (MVar (Either String BL.ByteString))
     inbox <- newInbox
     bracket
-            (subscribe nats inbox Nothing $ \_ _ response _ -> do
+            (subscribe nats inbox Nothing $ \_ _ response _ ->
                 void $ tryPutMVar mvar (Right response)
-            ) 
+            )
             (unsubscribe nats)
             (\_ -> do
-                sendMessage nats True (NatsClntPublish (makeSubject subject) (Just $ makeSubject inbox) body) $ Just $ \merr -> do
+                sendMessage nats True (NatsClntPublish (makeSubject subject) (Just $ makeSubject inbox) body) $ Just $ \merr ->
                     case merr of
                          Nothing -> return ()
-                         Just err -> tryPutMVar mvar (Left $ T.unpack err) >> return ()
+                         Just err -> void $ tryPutMVar mvar (Left $ T.unpack err)
                 result <- takeMVar mvar
                 case result of
                      Left err -> throwIO $ NatsException err
-                     Right res -> return $ res
+                     Right res -> return res
             )
 
 -- | Synchronous request/response for obtaining many messages in certain timespan
@@ -667,7 +661,7 @@ requestMany :: Nats
 requestMany nats subject body time = do
     result <- newIORef []
     inbox <- newInbox
-    bracket 
+    bracket
         (subscribe nats inbox Nothing $ \_ _ response _ ->
                 atomicModifyIORef result $ \old -> (response:old, ())
         )
@@ -677,25 +671,25 @@ requestMany nats subject body time = do
             threadDelay time
         )
     reverse <$> readIORef result
-            
+
 -- | Publish a message
-publish :: Nats 
+publish :: Nats
     -> String -- ^ Subject
     -> BL.ByteString -- ^ Data
     -> IO ()
-publish nats subject body = publish' nats subject Nothing body
-    
-publish' :: Nats 
+publish nats subject = publish' nats subject Nothing
+
+publish' :: Nats
     -> String -- ^ Subject
     -> Maybe String
     -> BL.ByteString -- ^ Data
     -> IO ()
-publish' nats subject inbox body = do
+publish' nats subject inbox body =
     -- Ignore errors - messages can get lost
     sendMessage nats False (NatsClntPublish (makeSubject subject) (makeSubject <$> inbox) body) Nothing
         `catches` [ Handler (\(_ :: IOException) -> return ()),
                     Handler (\(_ :: NatsException) -> return ()) ]
-    
+
 -- | Disconnect from a NATS server
 disconnect :: Nats -> IO ()
 disconnect nats = do
