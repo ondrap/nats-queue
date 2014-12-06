@@ -1,6 +1,4 @@
-{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE Rank2Types    #-}
-
 
 module Network.Nats.Json (
     subscribe
@@ -38,9 +36,10 @@ subscribe :: AE.FromJSON a =>
     -> IO NatsSID -- ^ SID of subscription
 subscribe nats subject queue jcallback = N.subscribe nats subject queue cb
     where
-        cb sid subj msg repl
-            | Just body <- AE.decode msg = jcallback sid subj body repl
-            | otherwise                       = return () -- Ignore when there is an error decoding
+        cb sid subj msg repl = case AE.eitherDecode msg of
+            Right body -> jcallback sid subj body repl
+            -- Ignore when there is an error decoding
+            Left err -> putStrLn $ err ++ ": " ++ show msg
 
 requestMany :: (AE.ToJSON a, AE.FromJSON b) =>
     Nats

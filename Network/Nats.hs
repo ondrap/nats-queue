@@ -86,7 +86,7 @@ module Network.Nats (
 ) where
 
 
-import           Control.Applicative        ((<$>))
+import           Control.Applicative        ((<$>), (<*>))
 import           Control.Concurrent
 import           Control.Concurrent.Async   (concurrently)
 import           Control.Exception          (AsyncException, Exception,
@@ -95,7 +95,7 @@ import           Control.Exception          (AsyncException, Exception,
                                              bracketOnError, catch, catches,
                                              throwIO)
 import           Control.Monad              (forever, replicateM, unless, void,
-                                             when)
+                                             when, mzero)
 import           Data.Dequeue               as D
 import qualified Data.Foldable              as FOLD
 import           Data.IORef
@@ -117,6 +117,7 @@ import qualified Data.Text                  as T
 import           Data.Text.Encoding         (decodeUtf8)
 
 import qualified Data.Aeson                 as AE
+import Data.Aeson ((.:), (.!=))
 import           Data.Aeson.TH              (defaultOptions, deriveJSON,
                                              fieldLabelModifier)
 
@@ -213,7 +214,15 @@ data NatsHost = NatsHost {
       , natsHPort :: Int
       , natsHUser :: String      -- ^ Username for authentication
       , natsHPass :: String  -- ^ Password for authentication
-    }
+    } deriving (Show)
+instance AE.FromJSON NatsHost where
+  parseJSON (AE.Object v) =
+    NatsHost <$>
+      v .: "host" <*>
+      v .: "port" .!= 4222 <*>
+      v .: "user" .!= "nats" <*>
+      v .: "pass" .!= "pass"
+  parseJSON _ = mzero
 
 -- | Advanced settings for connecting to NATS server
 data NatsSettings = NatsSettings {
