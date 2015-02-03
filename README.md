@@ -20,7 +20,7 @@ Haskell API for NATS messaging system (see https://github.com/derekcollison/nats
 
 Example use:
 
-```Haskell
+```haskell
 {-# LANGUAGE OverloadedStrings #-}
 import qualified Data.ByteString.Lazy as BL
 import Network.Nats
