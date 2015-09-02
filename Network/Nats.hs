@@ -537,7 +537,9 @@ connectionHandler' handle nats pingStatus = forever $ do
         -- | Pull callback for OK/ERR status from FIFO queue
         popCb (h, queue, x1, x2) = return ((h, newq, x1, x2), item)
             where
-                (item, newq) = D.popFront queue
+                (item, newq) = case D.popFront queue of
+                    Just inq -> inq
+                    Nothing  -> (maybe (return ()) print, D.empty)
         handleMessage NatsSvrPing = sendMessage nats True NatsClntPong Nothing
         handleMessage NatsSvrPong =
             atomicModifyIORef' pingStatus $
@@ -545,14 +547,10 @@ connectionHandler' handle nats pingStatus = forever $ do
 
         handleMessage NatsSvrOK = do
             cb <- modifyMVar (natsRuntime nats) popCb
-            case cb of
-                Just f -> f Nothing
-                Nothing -> return () -- This should not happen, spurious OK
+            cb Nothing
         handleMessage (NatsSvrError txt) = do
             cb <- modifyMVar (natsRuntime nats) popCb
-            case cb of
-                Just f -> f $ Just txt
-                Nothing -> print txt
+            cb $ Just txt
         handleMessage (NatsSvrInfo _) = return ()
         handleMessage (NatsSvrMsg {..}) = do
             msubscription <- Map.lookup msgSid <$> readIORef (natsSubMap nats)
